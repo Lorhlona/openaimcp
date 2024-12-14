@@ -117,3 +117,10 @@ python -m pytest -v tests/
 ## Contributing
 
 PRs welcome.
+
+cd mcp-llm-bridge ; .venv/Scripts/activate ; python -m mcp_llm_bridge.main
+
+
+cd mcp-llm-bridge
+.\.venv\Scripts\Activate.ps1
+python -m mcp_llm_bridge.main

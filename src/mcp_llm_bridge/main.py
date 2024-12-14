@@ -29,37 +29,41 @@ logger.addHandler(handler)
 logger.setLevel(logging.INFO)
 
 async def main():
-    # Load environment variables
+    # 環境変数の読み込み
     load_dotenv()
 
-    # Get the project root directory (where test.db is located)
+    # プロジェクトルートディレクトリの取得
     project_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
     db_path = os.path.join(project_root, "test.db")
     
-    # Configure bridge
+    # ブリッジの設定
     config = BridgeConfig(
         mcp_server_params=StdioServerParameters(
             command="uvx",
             args=["mcp-server-sqlite", "--db-path", db_path],
             env=None
         ),
-         llm_config=LLMConfig(
-             api_key=os.getenv("OPENAI_API_KEY"),
-             model=os.getenv("OPENAI_MODEL", "gpt-4o"),
-             base_url=None
-         ),
-        #llm_config=LLMConfig(
-           # api_key="ollama",  # Can be any string for local testing
-            #model="mistral-nemo:12b-instruct-2407-q8_0",
-            #base_url="http://192.168.87.34:11434/v1"  # Point to your local model's endpoint
-        #),
-        system_prompt="You are a helpful assistant that can use tools to help answer questions."
+        # ツール実行用の設定（Function Calling対応モデル）
+        llm_config=LLMConfig(
+            api_key=os.getenv("OPENAI_API_KEY"),
+            model="gpt-4o",  # Function Calling対応モデル
+            base_url=None,
+            max_tokens=2000
+        ),
+        # 思考プロセス用の設定（O1モデル）
+        thinking_config=LLMConfig(
+            api_key=os.getenv("OPENAI_API_KEY"),
+            model="o1-mini",  # O1モデル
+            base_url=None,
+            max_tokens=32768  # O1モデルの推奨設定
+        )
     )
     
-    logger.info(f"Starting bridge with model: {config.llm_config.model}")
+    logger.info(f"Starting bridge with thinking model: {config.thinking_config.model}")
+    logger.info(f"Tool execution model: {config.llm_config.model}")
     logger.info(f"Using database at: {db_path}")
     
-    # Use bridge with context manager
+    # コンテキストマネージャーを使用してブリッジを実行
     async with BridgeManager(config) as bridge:
         while True:
             try:

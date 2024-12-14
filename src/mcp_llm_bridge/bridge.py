@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from mcp import ClientSession, StdioServerParameters
 from mcp_llm_bridge.mcp_client import MCPClient
 from mcp_llm_bridge.llm_client import LLMClient
+from mcp_llm_bridge.thinking_client import ThinkingClient
 import asyncio
 import json
 from mcp_llm_bridge.config import BridgeConfig
@@ -29,53 +30,51 @@ handler.setFormatter(colorlog.ColoredFormatter(
 
 logger = colorlog.getLogger(__name__)
 logger.addHandler(handler)
-logger.setLevel(logging.INFO)
+logger.setLevel(logging.DEBUG)  # DEBUGレベルに変更
 
 class MCPLLMBridge:
-    """Bridge between MCP protocol and LLM client"""
+    """Bridge between MCP protocol and LLM client with separate thinking process"""
     
     def __init__(self, config: BridgeConfig):
         self.config = config
         self.mcp_client = MCPClient(config.mcp_server_params)
         self.llm_client = LLMClient(config.llm_config)
-        self.query_tool = DatabaseQueryTool("test.db")  # Initialize database query tool
+        self.thinking_client = ThinkingClient(config.get_thinking_config())
+        self.query_tool = DatabaseQueryTool("test.db")
         
-        # Combine system prompt with schema information
-        schema_prompt = f"""
-Available Database Schema:
+        # ツール実行用のプロンプト
+        tool_prompt = f"""
+あなたはデータベースクエリの専門家です。以下のスキーマに基づいて、
+適切なSQLクエリを実行してください：
+
 {self.query_tool.get_schema_description()}
 
-When querying the database:
-1. Use the exact column names as specified in the schema
-2. Make sure your queries are valid SQL
-3. The database is SQLite, so use compatible syntax
+注意点：
+1. スキーマで定義された正確なカラム名を使用
+2. 有効なSQLクエリを作成
+3. SQLite互換の構文を使用
+
+データベースの内容を確認する場合は、以下のようなクエリを使用してください：
+- 全商品の一覧: SELECT * FROM products;
+- 全カテゴリの一覧: SELECT * FROM categories;
+- 特定の情報を検索: SELECT * FROM products WHERE ...;
 """
-        if config.system_prompt:
-            self.llm_client.system_prompt = f"{config.system_prompt}\n\n{schema_prompt}"
-        else:
-            self.llm_client.system_prompt = schema_prompt
+        self.llm_client.system_prompt = tool_prompt
             
         self.available_tools: List[Any] = []
-        self.tool_name_mapping: Dict[str, str] = {}  # Maps OpenAI tool names to MCP tool names
+        self.tool_name_mapping: Dict[str, str] = {}
 
     async def initialize(self):
         """Initialize both clients and set up tools"""
         try:
-            # Connect MCP client
             await self.mcp_client.connect()
-            
-            # Get available tools from MCP and add our database tool
             mcp_tools = await self.mcp_client.get_available_tools()
             if hasattr(mcp_tools, 'tools'):
                 self.available_tools = [*mcp_tools.tools, self.query_tool.get_tool_spec()]
             else:
                 self.available_tools = [*mcp_tools, self.query_tool.get_tool_spec()]
             
-            logger.debug(f"MCP Tools received: {self.available_tools}")
-            
-            # Convert and register tools with LLM client
             converted_tools = self._convert_mcp_tools_to_openai_format(self.available_tools)
-            logger.debug(f"Converted tools for OpenAI: {converted_tools}")
             self.llm_client.tools = converted_tools
             
             return True
@@ -87,32 +86,18 @@ When querying the database:
         """Convert MCP tool format to OpenAI tool format"""
         openai_tools = []
         
-        logger.debug(f"Input mcp_tools type: {type(mcp_tools)}")
-        logger.debug(f"Input mcp_tools: {mcp_tools}")
-        
-        # Extract tools from the response
         if hasattr(mcp_tools, 'tools'):
             tools_list = mcp_tools.tools
-            logger.debug("Found ListToolsResult, extracting tools attribute")
         elif isinstance(mcp_tools, dict):
             tools_list = mcp_tools.get('tools', [])
-            logger.debug("Found dict, extracting 'tools' key")
         else:
             tools_list = mcp_tools
-            logger.debug("Using mcp_tools directly as list")
             
-        logger.debug(f"Tools list type: {type(tools_list)}")
-        logger.debug(f"Tools list: {tools_list}")
-        
-        # Process each tool in the list
         if isinstance(tools_list, list):
-            logger.debug(f"Processing {len(tools_list)} tools")
             for tool in tools_list:
-                logger.debug(f"Processing tool: {tool}, type: {type(tool)}")
                 if hasattr(tool, 'name') and hasattr(tool, 'description'):
                     openai_name = self._sanitize_tool_name(tool.name)
                     self.tool_name_mapping[openai_name] = tool.name
-                    logger.debug(f"Tool has required attributes. Name: {tool.name}")
                     
                     tool_schema = getattr(tool, 'inputSchema', {
                         "type": "object",
@@ -129,44 +114,73 @@ When querying the database:
                         }
                     }
                     openai_tools.append(openai_tool)
-                    logger.debug(f"Converted tool {tool.name} to OpenAI format")
-                else:
-                    logger.debug(f"Tool missing required attributes: has name = {hasattr(tool, 'name')}, has description = {hasattr(tool, 'description')}")
-        else:
-            logger.debug(f"Tools list is not a list, it's a {type(tools_list)}")
         
         return openai_tools
 
     def _sanitize_tool_name(self, name: str) -> str:
         """Sanitize tool name for OpenAI compatibility"""
-        # Replace any characters that might cause issues
         return name.replace("-", "_").replace(" ", "_").lower()
 
     async def process_message(self, message: str) -> str:
-        """Process a user message through the bridge"""
+        """Process a user message through the bridge with separate thinking process"""
         try:
-            # Send message to LLM
-            logger.debug(f"Sending message to LLM: {message}")
-            response = await self.llm_client.invoke_with_prompt(message)
-            logger.debug(f"LLM Response: {response}")
+            # 1. 内部分析（O1モデル）
+            logger.info("=== O1モデルによる内部分析開始 ===")
+            logger.info(f"入力メッセージ: {message}")
+            thinking_response = await self.thinking_client.think(message)
+            logger.info(f"O1モデルの分析結果: {thinking_response.content}")
+            logger.info(f"ツール使用の必要性: {thinking_response.needs_tool}")
             
-            # Keep processing tool calls until we get a final response
-            while response.is_tool_call:
-                if not response.tool_calls:
-                    break
-                    
-                logger.debug(f"Tool calls detected: {response.tool_calls}")
-                tool_responses = await self._handle_tool_calls(response.tool_calls)
-                logger.debug(f"Tool responses: {tool_responses}")
+            # 2. ツールの使用が必要か判断
+            if thinking_response.needs_tool:
+                logger.info("=== GPT-4によるツール実行開始 ===")
                 
-                # Continue the conversation with tool results
-                response = await self.llm_client.invoke(tool_responses)
-                logger.debug(f"Next LLM response: {response}")
+                # GPT-4にツール実行を依頼
+                tool_instruction = f"""
+ユーザーの質問: {message}
+
+必要な情報を取得するために、適切なデータベースクエリを実行してください。
+結果は分かりやすい形式で返してください。
+"""
+                logger.info(f"GPT-4への指示: {tool_instruction}")
+                tool_response = await self.llm_client.invoke_with_prompt(tool_instruction)
+                
+                tool_results = []
+                # ツール実行のループ
+                while tool_response.is_tool_call and tool_response.tool_calls:
+                    logger.info(f"GPT-4が要求したツール実行: {tool_response.tool_calls}")
+                    # ツールの実行
+                    current_results = await self._handle_tool_calls(tool_response.tool_calls)
+                    logger.info(f"ツール実行結果: {current_results}")
+                    tool_results.extend(current_results)
+                    
+                    # 結果を使って次のツール呼び出しが必要か確認
+                    tool_response = await self.llm_client.invoke(current_results)
+                
+                # 3. 最終評価（O1モデル）
+                logger.info("=== O1モデルによる最終評価開始 ===")
+                final_prompt = f"""
+ユーザーの質問: {message}
+
+データベースから取得した情報:
+{json.dumps(tool_results, ensure_ascii=False, indent=2)}
+
+この情報を分析し、ユーザーにとって分かりやすい形で回答を作成してください。
+技術的な詳細は省略し、重要なポイントに焦点を当ててください。
+"""
+                logger.info(f"O1モデルへの最終プロンプト: {final_prompt}")
+                final_thinking = await self.thinking_client.think(final_prompt)
+                logger.info(f"O1モデルの最終回答: {final_thinking.content}")
+                return final_thinking.content
+                    
+            else:
+                # ツールが不要な場合は直接回答
+                logger.info("ツール使用不要と判断、直接回答を返します")
+                return thinking_response.content
             
-            return response.content
         except Exception as e:
             logger.error(f"Error processing message: {str(e)}", exc_info=True)
-            return f"Error processing message: {str(e)}"
+            return f"申し訳ありません。処理中にエラーが発生しました: {str(e)}"
 
     async def _handle_tool_calls(self, tool_calls: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Handle tool calls through MCP"""
@@ -174,37 +188,28 @@ When querying the database:
         
         for tool_call in tool_calls:
             try:
-                logger.debug(f"Processing tool call: {tool_call}")
-                # Get original MCP tool name
                 openai_name = tool_call.function.name
                 mcp_name = self.tool_name_mapping.get(openai_name)
                 
                 if not mcp_name:
                     raise ValueError(f"Unknown tool: {openai_name}")
                 
-                # Parse arguments
                 arguments = json.loads(tool_call.function.arguments)
-                logger.debug(f"Tool arguments: {arguments}")
-                
-                # Execute through MCP
+                logger.info(f"ツール実行: {mcp_name}, 引数: {arguments}")
                 result = await self.mcp_client.call_tool(mcp_name, arguments)
-                logger.debug(f"Raw MCP result: {result}")
                 
-                # Format response - handle both string and structured results
                 if isinstance(result, str):
                     output = result
                 elif hasattr(result, 'content') and isinstance(result.content, list):
-                    # Handle MCP CallToolResult format
                     output = " ".join(
                         content.text for content in result.content 
                         if hasattr(content, 'text')
                     )
                 else:
-                    output = str(result)  # Use str() instead of json.dumps()
+                    output = str(result)
                 
-                logger.debug(f"Formatted output: {output}")
+                logger.info(f"ツール実行結果: {output}")
                 
-                # Format response
                 tool_responses.append({
                     "tool_call_id": tool_call.id,
                     "output": output
