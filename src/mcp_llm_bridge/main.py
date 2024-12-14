@@ -43,16 +43,16 @@ async def main():
             args=["mcp-server-sqlite", "--db-path", db_path],
             env=None
         ),
-        # llm_config=LLMConfig(
-        #     api_key=os.getenv("OPENAI_API_KEY"),
-        #     model=os.getenv("OPENAI_MODEL", "gpt-4o"),
-        #     base_url=None
-        # ),
-        llm_config=LLMConfig(
-            api_key="ollama",  # Can be any string for local testing
-            model="mistral-nemo:12b-instruct-2407-q8_0",
-            base_url="http://192.168.87.34:11434/v1"  # Point to your local model's endpoint
-        ),
+         llm_config=LLMConfig(
+             api_key=os.getenv("OPENAI_API_KEY"),
+             model=os.getenv("OPENAI_MODEL", "gpt-4o"),
+             base_url=None
+         ),
+        #llm_config=LLMConfig(
+           # api_key="ollama",  # Can be any string for local testing
+            #model="mistral-nemo:12b-instruct-2407-q8_0",
+            #base_url="http://192.168.87.34:11434/v1"  # Point to your local model's endpoint
+        #),
         system_prompt="You are a helpful assistant that can use tools to help answer questions."
     )
     
