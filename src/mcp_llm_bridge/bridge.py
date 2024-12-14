@@ -58,6 +58,9 @@ class MCPLLMBridge:
 - 全商品の一覧: SELECT * FROM products;
 - 全カテゴリの一覧: SELECT * FROM categories;
 - 特定の情報を検索: SELECT * FROM products WHERE ...;
+
+必要な情報を取得するために、適切なクエリを実行してください。
+複数のクエリが必要な場合は、順番に実行してください。
 """
         self.llm_client.system_prompt = tool_prompt
             
@@ -124,63 +127,128 @@ class MCPLLMBridge:
     async def process_message(self, message: str) -> str:
         """Process a user message through the bridge with separate thinking process"""
         try:
-            # 1. 内部分析（O1モデル）
-            logger.info("=== O1モデルによる内部分析開始 ===")
-            logger.info(f"入力メッセージ: {message}")
-            thinking_response = await self.thinking_client.think(message)
-            logger.info(f"O1モデルの分析結果: {thinking_response.content}")
-            logger.info(f"ツール使用の必要性: {thinking_response.needs_tool}")
-            
-            # 2. ツールの使用が必要か判断
-            if thinking_response.needs_tool:
-                logger.info("=== GPT-4によるツール実行開始 ===")
+            iteration = 0
+            max_iterations = 3  # 最大3回まで実行可能（初回 + 最大2回の追加実行）
+            accumulated_results = []
+            original_message = message
+            final_response = None
+
+            while iteration < max_iterations:
+                logger.info(f"=== 実行イテレーション {iteration + 1}/{max_iterations} ===")
                 
-                # GPT-4にツール実行を依頼
-                tool_instruction = f"""
-ユーザーの質問: {message}
+                # 1. 内部分析（O1モデル）
+                logger.info("=== O1モデルによる内部分析開始 ===")
+                thinking_response = await self.thinking_client.think(
+                    message,
+                    tool_result=json.dumps(accumulated_results, ensure_ascii=False, indent=2) if accumulated_results else None,
+                    iteration=iteration
+                )
+                logger.info(f"O1モデルの分析結果: {thinking_response.content}")
+                logger.info(f"ツール使用の必要性: {thinking_response.needs_tool}")
+                logger.info(f"タスク完了状態: {thinking_response.task_completed}")
+
+                # 現在の応答を保存
+                final_response = thinking_response.content
+                
+                # タスクが完了している場合は終了
+                if thinking_response.task_completed:
+                    logger.info("タスク完了、処理を終了します")
+                    return self._format_final_response(final_response, accumulated_results)
+                
+                # ツールの使用が必要か判断
+                if thinking_response.needs_tool:
+                    logger.info("=== GPT-4によるツール実行開始 ===")
+                    
+                    # GPT-4にツール実行を依頼
+                    current_context = f"""
+ユーザーの質問: {original_message}
+
+これまでの実行結果:
+{json.dumps(accumulated_results, ensure_ascii=False, indent=2) if accumulated_results else "なし"}
+
+O1モデルの分析:
+{thinking_response.content}
 
 必要な情報を取得するために、適切なデータベースクエリを実行してください。
-結果は分かりやすい形式で返してください。
+複数のクエリが必要な場合は、順番に実行してください。
 """
-                logger.info(f"GPT-4への指示: {tool_instruction}")
-                tool_response = await self.llm_client.invoke_with_prompt(tool_instruction)
-                
-                tool_results = []
-                # ツール実行のループ
-                while tool_response.is_tool_call and tool_response.tool_calls:
-                    logger.info(f"GPT-4が要求したツール実行: {tool_response.tool_calls}")
-                    # ツールの実行
-                    current_results = await self._handle_tool_calls(tool_response.tool_calls)
-                    logger.info(f"ツール実行結果: {current_results}")
-                    tool_results.extend(current_results)
+                    logger.info(f"GPT-4への指示: {current_context}")
+                    tool_response = await self.llm_client.invoke_with_prompt(current_context)
                     
-                    # 結果を使って次のツール呼び出しが必要か確認
-                    tool_response = await self.llm_client.invoke(current_results)
-                
-                # 3. 最終評価（O1モデル）
-                logger.info("=== O1モデルによる最終評価開始 ===")
-                final_prompt = f"""
-ユーザーの質問: {message}
+                    # ツール実行のループ
+                    while tool_response.is_tool_call and tool_response.tool_calls:
+                        logger.info(f"GPT-4が要求したツール実行: {tool_response.tool_calls}")
+                        current_results = await self._handle_tool_calls(tool_response.tool_calls)
+                        logger.info(f"ツール実行結果: {current_results}")
+                        accumulated_results.extend(current_results)
+                        
+                        # 結果を使って次のツール呼び出しが必要か確認
+                        tool_response = await self.llm_client.invoke(current_results)
+                    
+                    # 次のイテレーションのためにメッセージを更新
+                    message = f"""
+元の質問: {original_message}
 
-データベースから取得した情報:
-{json.dumps(tool_results, ensure_ascii=False, indent=2)}
+これまでの実行結果:
+{json.dumps(accumulated_results, ensure_ascii=False, indent=2)}
 
-この情報を分析し、ユーザーにとって分かりやすい形で回答を作成してください。
-技術的な詳細は省略し、重要なポイントに焦点を当ててください。
+この情報を元に、タスクが完了したか、さらなる情報が必要か判断してください。
 """
-                logger.info(f"O1モデルへの最終プロンプト: {final_prompt}")
-                final_thinking = await self.thinking_client.think(final_prompt)
-                logger.info(f"O1モデルの最終回答: {final_thinking.content}")
-                return final_thinking.content
-                    
-            else:
-                # ツールが不要な場合は直接回答
-                logger.info("ツール使用不要と判断、直接回答を返します")
-                return thinking_response.content
+                else:
+                    # ツールが不要な場合は直接回答
+                    logger.info("ツール使用不要と判断、直接回答を返します")
+                    return self._format_final_response(final_response, accumulated_results)
+                
+                iteration += 1
+            
+            # 最大イテレーション回数に達した場合の最終評価
+            logger.info("=== 最大イテレーション回数到達、最終評価実行 ===")
+            final_prompt = f"""
+ユーザーの質問: {original_message}
+
+収集した全ての情報:
+{json.dumps(accumulated_results, ensure_ascii=False, indent=2)}
+
+最大実行回数（{max_iterations}回）に達しました。
+現在の情報を元に、最終的な回答を作成してください。
+"""
+            final_thinking = await self.thinking_client.think(final_prompt, iteration=max_iterations)
+            return self._format_final_response(final_thinking.content, accumulated_results)
             
         except Exception as e:
             logger.error(f"Error processing message: {str(e)}", exc_info=True)
             return f"申し訳ありません。処理中にエラーが発生しました: {str(e)}"
+
+    def _format_final_response(self, response: str, results: List[Dict[str, Any]]) -> str:
+        """Format the final response with execution results"""
+        if not response or not "【実行結果】" in response:
+            # レスポンスが標準フォーマットでない場合、整形する
+            formatted_response = "【実行結果】\n"
+            if results:
+                formatted_response += "データベースの操作が完了しました。\n\n"
+                formatted_response += "【タスク状態】\n"
+                formatted_response += "タスクは完了しました。\n\n"
+                formatted_response += "【詳細情報】\n"
+                try:
+                    # 結果の整形
+                    for result in results:
+                        if "output" in result:
+                            try:
+                                # JSON文字列をパース
+                                output_data = json.loads(result["output"].replace("'", '"'))
+                                formatted_response += json.dumps(output_data, ensure_ascii=False, indent=2)
+                            except:
+                                # パースに失敗した場合は生の出力を使用
+                                formatted_response += result["output"]
+                            formatted_response += "\n"
+                except Exception as e:
+                    logger.error(f"結果の整形中にエラーが発生: {str(e)}")
+                    formatted_response += str(results)
+            else:
+                formatted_response += response
+
+            return formatted_response
+        return response
 
     async def _handle_tool_calls(self, tool_calls: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Handle tool calls through MCP"""
