@@ -1,3 +1,8 @@
+"""
+Database query tool for MCP LLM Bridge.
+Provides functionality to execute SQL queries against a SQLite database with schema validation.
+"""
+
 from typing import Dict, List, Any
 from dataclasses import dataclass
 import sqlite3

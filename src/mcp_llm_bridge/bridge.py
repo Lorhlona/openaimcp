@@ -10,7 +10,7 @@ import json
 from mcp_llm_bridge.config import BridgeConfig
 import logging
 import colorlog
-from mcp_llm_bridge.tools import DatabaseQueryTool
+from mcp_llm_bridge.tools import DatabaseQueryTool, GoogleSearchTool
 
 handler = colorlog.StreamHandler()
 handler.setFormatter(colorlog.ColoredFormatter(
@@ -41,31 +41,50 @@ class MCPLLMBridge:
         self.llm_client = LLMClient(config.llm_config)
         self.thinking_client = ThinkingClient(config.get_thinking_config())
         self.query_tool = DatabaseQueryTool("test.db")
+        self.search_tool = GoogleSearchTool()
         
         # ツール実行用のプロンプト
-        tool_prompt = f"""
-あなたはデータベースクエリの専門家です。与えられた指示に従って、
-利用可能なファンクションを使用してクエリを実行してください。
+        tool_prompt = """
+あなたは高度なアシスタントで、データベースクエリとGoogle検索の専門家です。
+与えられた指示に従って、利用可能なファンクションを使用してタスクを実行してください。
 
 【利用可能なファンクション】
 1. database_query
 - 説明: SQLiteデータベースに対してクエリを実行
 - パラメータ: query (string) - 実行するSQLクエリ
 - 戻り値: クエリ結果のJSON形式データ
+- 使用例: {"query": "SELECT * FROM products LIMIT 1;"}
+
+2. google_search
+- 説明: Google検索を実行して関連する結果を取得
+- パラメータ:
+  - query (string) - 検索クエリ文字列（商品名、モデル、価格などの具体的な情報を含める）
+  - num_results (integer, optional) - 取得する結果の数（1-10、デフォルト5）
+- 戻り値: 検索結果のJSON形式データ
+- 使用例: 
+  - 基本検索: {"query": "Laptop Pro X price specs reviews 2024", "num_results": 5}
+  - 価格検索: {"query": "Laptop Pro X current price sale", "num_results": 3}
 
 【データベーススキーマ】
-{self.query_tool.get_schema_description()}
+""" + self.query_tool.get_schema_description() + """
 
 【実行ルール】
-1. 1フェーズで最大3つまでのクエリ実行
-2. スキーマで定義された正確なカラム名を使用
-3. SQLite互換の構文を使用
+1. 1フェーズで最大3つまでのクエリまたは検索を実行
+2. データベースクエリの場合:
+   - スキーマで定義された正確なカラム名を使用
+   - SQLite互換の構文を使用
+3. Google検索の場合:
+   - 具体的で詳細な検索クエリを使用（商品名、モデル、年など）
+   - 価格情報を取得する場合は "price"、"cost"、"sale" などのキーワードを含める
+   - 必要に応じて結果数を指定
 4. 未定義のファンクションは使用不可
 
-【クエリ例】
-- 全商品の一覧: SELECT * FROM products;
-- 全カテゴリの一覧: SELECT * FROM categories;
-- 特定の情報を検索: SELECT * FROM products WHERE ...;
+【実行例】
+1. データベース操作:
+   database_query({"query": "SELECT * FROM products WHERE category = 'Electronics';"})
+
+2. Google検索:
+   google_search({"query": "Laptop Pro X latest price 2024 review", "num_results": 5})
 
 実行フェーズで指定されたクエリのみを実行し、3クエリの制限を厳守してください。
 """
@@ -79,11 +98,24 @@ class MCPLLMBridge:
         try:
             await self.mcp_client.connect()
             mcp_tools = await self.mcp_client.get_available_tools()
-            if hasattr(mcp_tools, 'tools'):
-                self.available_tools = [*mcp_tools.tools, self.query_tool.get_tool_spec()]
-            else:
-                self.available_tools = [*mcp_tools, self.query_tool.get_tool_spec()]
             
+            # ツールの仕様を取得
+            query_tool_spec = self.query_tool.get_tool_spec()
+            search_tool_spec = self.search_tool.get_tool_spec()
+            
+            # ツール名のマッピングを設定
+            self.tool_name_mapping = {
+                self._sanitize_tool_name(query_tool_spec["name"]): query_tool_spec["name"],
+                self._sanitize_tool_name(search_tool_spec["name"]): search_tool_spec["name"]
+            }
+            
+            # 利用可能なツールを設定
+            if hasattr(mcp_tools, 'tools'):
+                self.available_tools = [*mcp_tools.tools, query_tool_spec, search_tool_spec]
+            else:
+                self.available_tools = [*mcp_tools, query_tool_spec, search_tool_spec]
+            
+            # OpenAI形式に変換
             converted_tools = self._convert_mcp_tools_to_openai_format(self.available_tools)
             self.llm_client.tools = converted_tools
             
@@ -177,13 +209,13 @@ class MCPLLMBridge:
                         phase_info = thinking_response.content.split("【実行フェーズ】")[1].split("【詳細情報】")[0].strip()
                     except IndexError:
                         # フェーズ情報が見つからない場合のフォールバック
-                        logger.warning("実行フェーズ情報が見つかりません。デフォルトのクエリを使用します。")
+                        logger.warning("実行フェーズ情報が見つかりません。デフォルトの実行を使用します。")
                         phase_info = (
                             "現在のフェーズ: 1/1\n"
-                            "実行すべきクエリ:\n"
-                            "1. テーブル構造の確認 (SELECT * FROM sqlite_master WHERE type='table')\n"
-                            "2. 商品データの取得 (SELECT * FROM products)\n"
-                            "3. カテゴリ情報の取得 (SELECT * FROM categories)"
+                            "実行すべき操作:\n"
+                            "1. 基本的な情報収集\n"
+                            "2. 詳細データの取得\n"
+                            "3. 結果の確認と検証"
                         )
 
                     current_context = (
@@ -193,9 +225,9 @@ class MCPLLMBridge:
                         f"- User Query: {original_message}\n"
                         f"- Previous Results: {json.dumps(accumulated_results, ensure_ascii=False, indent=2) if accumulated_results else 'None'}\n\n"
                         f"INSTRUCTIONS:\n"
-                        f"1. Execute the specified queries in order\n"
-                        f"2. Do not exceed 3 queries per phase\n"
-                        f"3. Use only the available database_query function\n"
+                        f"1. Execute the specified operations in order\n"
+                        f"2. Do not exceed 3 operations per phase\n"
+                        f"3. Use only the available functions (database_query or google_search)\n"
                         f"4. Return results in JSON format"
                     )
                     logger.info(f"GPT-4への指示: {current_context}")
@@ -251,7 +283,7 @@ class MCPLLMBridge:
             # レスポンスが標準フォーマットでない場合、整形する
             formatted_response = "【実行結果】\n"
             if results:
-                formatted_response += "データベースの操作が完了しました。\n\n"
+                formatted_response += "操作が完了しました。\n\n"
                 formatted_response += "【タスク状態】\n"
                 formatted_response += "タスクは完了しました。\n\n"
                 formatted_response += "【詳細情報】\n"
@@ -290,7 +322,14 @@ class MCPLLMBridge:
                 
                 arguments = json.loads(tool_call.function.arguments)
                 logger.info(f"ツール実行: {mcp_name}, 引数: {arguments}")
-                result = await self.mcp_client.call_tool(mcp_name, arguments)
+                
+                # ツールの種類に基づいて実行
+                if mcp_name == "google_search":
+                    result = await self.search_tool.execute(arguments)
+                elif mcp_name == "database_query":
+                    result = await self.query_tool.execute(arguments)
+                else:
+                    result = await self.mcp_client.call_tool(mcp_name, arguments)
                 
                 if isinstance(result, str):
                     output = result
