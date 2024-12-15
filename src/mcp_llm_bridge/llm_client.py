@@ -45,14 +45,18 @@ class LLMResponse:
         
     def get_message(self) -> Dict[str, Any]:
         """Get standardized message format"""
-        return {
+        message = {
             "role": "assistant",
-            "content": self.content,
-            "tool_calls": self.tool_calls
+            "content": self.content
         }
+        if self.tool_calls:
+            message["tool_calls"] = self.tool_calls
+        return message
 
 class LLMClient:
     """Client for interacting with OpenAI-compatible LLMs"""
+    
+    MAX_QUERIES_PER_CONVERSATION = 3  # GPT-4oの制限
     
     def __init__(self, config: LLMConfig):
         self.config = config
@@ -63,7 +67,9 @@ class LLMClient:
         self.tools = []
         self.messages = []
         self.system_prompt = None
-    
+        self.last_tool_calls = None
+        self.query_count = 0
+        
     def _prepare_messages(self) -> List[Dict[str, Any]]:
         """Prepare messages for API call"""
         formatted_messages = []
@@ -79,12 +85,37 @@ class LLMClient:
     
     async def invoke_with_prompt(self, prompt: str) -> LLMResponse:
         """Send a single prompt to the LLM"""
+        if self.query_count >= self.MAX_QUERIES_PER_CONVERSATION:
+            logger.warning(f"クエリ制限（{self.MAX_QUERIES_PER_CONVERSATION}回）に達しました")
+            return LLMResponse(type('obj', (object,), {
+                "choices": [type('obj', (object,), {
+                    "finish_reason": "stop",
+                    "message": type('obj', (object,), {
+                        "content": f"クエリ制限（{self.MAX_QUERIES_PER_CONVERSATION}回）に達したため、これ以上の質問を処理できません。",
+                        "tool_calls": None
+                    })
+                })]
+            }))
+        
+        # もし前回のツール呼び出しが未処理の場合、エラーを防ぐためにダミーの応答を追加
+        if self.last_tool_calls:
+            for tool_call in self.last_tool_calls:
+                self.messages.append({
+                    "role": "tool",
+                    "content": "Previous tool call was not properly handled",
+                    "tool_call_id": tool_call.id
+                })
+            self.last_tool_calls = None
+        
         self.messages.append({
             "role": "user",
             "content": prompt
         })
         
-        return await self.invoke([])
+        response = await self.invoke([])  # invokeメソッド内でクエリカウントが増加します
+        if response.tool_calls:
+            self.last_tool_calls = response.tool_calls
+        return response
     
     async def invoke(self, tool_results: Optional[List[Dict[str, Any]]] = None) -> LLMResponse:
         """Invoke the LLM with optional tool results"""
@@ -95,16 +126,50 @@ class LLMClient:
                     "content": str(result.get("output", "")),  # Convert to string and provide default
                     "tool_call_id": result["tool_call_id"]
                 })
+            # ツール結果を処理したので、last_tool_callsをクリア
+            self.last_tool_calls = None
         
-        completion = self.client.chat.completions.create(
-            model=self.config.model,
-            messages=self._prepare_messages(),
-            tools=self.tools if self.tools else None,
-            temperature=self.config.temperature,
-            max_tokens=self.config.max_tokens
-        )
+        if self.query_count >= self.MAX_QUERIES_PER_CONVERSATION:
+            logger.warning(f"クエリ制限（{self.MAX_QUERIES_PER_CONVERSATION}回）に達しました")
+            return LLMResponse(type('obj', (object,), {
+                "choices": [type('obj', (object,), {
+                    "finish_reason": "stop",
+                    "message": type('obj', (object,), {
+                        "content": f"クエリ制限（{self.MAX_QUERIES_PER_CONVERSATION}回）に達したため、これ以上の質問を処理できません。",
+                        "tool_calls": None
+                    })
+                })]
+            }))
+        
+        self.query_count += 1
+        logger.info(f"クエリ実行回数: {self.query_count}/{self.MAX_QUERIES_PER_CONVERSATION}")
+        
+        try:
+            try:
+                logger.debug(f"送信するメッセージ: {self._prepare_messages()}")
+                logger.debug(f"利用可能なツール: {self.tools}")
+                completion = self.client.chat.completions.create(
+                    model=self.config.model,
+                    messages=self._prepare_messages(),
+                    tools=self.tools if self.tools else None,
+                    temperature=self.config.temperature,
+                    max_tokens=self.config.max_tokens
+                )
+                logger.debug(f"APIレスポンス: {completion}")
+            except Exception as e:
+                logger.error(f"API呼び出しエラー: {str(e)}")
+                raise
+            logger.debug(f"使用可能なツール: {self.tools}")
+            logger.debug(f"送信されたメッセージ: {self._prepare_messages()}")
+        except Exception as e:
+            logger.error(f"API呼び出しエラー: {str(e)}")
+            raise
         
         response = LLMResponse(completion)
         self.messages.append(response.get_message())
+        
+        # 新しいツール呼び出しがある場合は保存
+        if response.tool_calls:
+            self.last_tool_calls = response.tool_calls
         
         return response
