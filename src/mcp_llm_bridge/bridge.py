@@ -44,23 +44,30 @@ class MCPLLMBridge:
         
         # ツール実行用のプロンプト
         tool_prompt = f"""
-あなたはデータベースクエリの専門家です。以下のスキーマに基づいて、
-適切なSQLクエリを実行してください：
+あなたはデータベースクエリの専門家です。与えられた指示に従って、
+利用可能なファンクションを使用してクエリを実行してください。
 
+【利用可能なファンクション】
+1. database_query
+- 説明: SQLiteデータベースに対してクエリを実行
+- パラメータ: query (string) - 実行するSQLクエリ
+- 戻り値: クエリ結果のJSON形式データ
+
+【データベーススキーマ】
 {self.query_tool.get_schema_description()}
 
-注意点：
-1. スキーマで定義された正確なカラム名を使用
-2. 有効なSQLクエリを作成
+【実行ルール】
+1. 1フェーズで最大3つまでのクエリ実行
+2. スキーマで定義された正確なカラム名を使用
 3. SQLite互換の構文を使用
+4. 未定義のファンクションは使用不可
 
-データベースの内容を確認する場合は、以下のようなクエリを使用してください：
+【クエリ例】
 - 全商品の一覧: SELECT * FROM products;
 - 全カテゴリの一覧: SELECT * FROM categories;
 - 特定の情報を検索: SELECT * FROM products WHERE ...;
 
-必要な情報を取得するために、適切なクエリを実行してください。
-複数のクエリが必要な場合は、順番に実行してください。
+実行フェーズで指定されたクエリのみを実行し、3クエリの制限を厳守してください。
 """
         self.llm_client.system_prompt = tool_prompt
             
@@ -95,7 +102,6 @@ class MCPLLMBridge:
             tools_list = mcp_tools.get('tools', [])
         else:
             tools_list = mcp_tools
-            
         if isinstance(tools_list, list):
             for tool in tools_list:
                 if hasattr(tool, 'name') and hasattr(tool, 'description'):
@@ -135,7 +141,7 @@ class MCPLLMBridge:
 
             while iteration < max_iterations:
                 logger.info(f"=== 実行イテレーション {iteration + 1}/{max_iterations} ===")
-                
+
                 # 1. 内部分析（O1モデル）
                 logger.info("=== O1モデルによる内部分析開始 ===")
                 thinking_response = await self.thinking_client.think(
@@ -149,42 +155,56 @@ class MCPLLMBridge:
 
                 # 現在の応答を保存
                 final_response = thinking_response.content
-                
+
                 # タスクが完了している場合は終了
                 if thinking_response.task_completed:
                     logger.info("タスク完了、処理を終了します")
                     return self._format_final_response(final_response, accumulated_results)
-                
+
                 # ツールの使用が必要か判断
                 if thinking_response.needs_tool:
                     logger.info("=== GPT-4によるツール実行開始 ===")
-                    
+
                     # GPT-4にツール実行を依頼
-                    current_context = f"""
-ユーザーの質問: {original_message}
+                    # O1の分析から実行フェーズ情報を抽出
+                    try:
+                        phase_info = thinking_response.content.split("【実行フェーズ】")[1].split("【詳細情報】")[0].strip()
+                    except IndexError:
+                        # フェーズ情報が見つからない場合のフォールバック
+                        logger.warning("実行フェーズ情報が見つかりません。デフォルトのクエリを使用します。")
+                        phase_info = (
+                            "現在のフェーズ: 1/1\n"
+                            "実行すべきクエリ:\n"
+                            "1. テーブル構造の確認 (SELECT * FROM sqlite_master WHERE type='table')\n"
+                            "2. 商品データの取得 (SELECT * FROM products)\n"
+                            "3. カテゴリ情報の取得 (SELECT * FROM categories)"
+                        )
 
-これまでの実行結果:
-{json.dumps(accumulated_results, ensure_ascii=False, indent=2) if accumulated_results else "なし"}
-
-O1モデルの分析:
-{thinking_response.content}
-
-必要な情報を取得するために、適切なデータベースクエリを実行してください。
-複数のクエリが必要な場合は、順番に実行してください。
-"""
+                    current_context = (
+                        f"EXECUTION_PHASE:\n"
+                        f"{phase_info}\n\n"
+                        f"CONTEXT:\n"
+                        f"- User Query: {original_message}\n"
+                        f"- Previous Results: {json.dumps(accumulated_results, ensure_ascii=False, indent=2) if accumulated_results else 'None'}\n\n"
+                        f"INSTRUCTIONS:\n"
+                        f"1. Execute the specified queries in order\n"
+                        f"2. Do not exceed 3 queries per phase\n"
+                        f"3. Use only the available database_query function\n"
+                        f"4. Return results in JSON format"
+                    )
                     logger.info(f"GPT-4への指示: {current_context}")
                     tool_response = await self.llm_client.invoke_with_prompt(current_context)
-                    
+
                     # ツール実行のループ
                     while tool_response.is_tool_call and tool_response.tool_calls:
                         logger.info(f"GPT-4が要求したツール実行: {tool_response.tool_calls}")
                         current_results = await self._handle_tool_calls(tool_response.tool_calls)
                         logger.info(f"ツール実行結果: {current_results}")
                         accumulated_results.extend(current_results)
-                        
+
                         # 結果を使って次のツール呼び出しが必要か確認
                         tool_response = await self.llm_client.invoke(current_results)
-                    
+
                     # 次のイテレーションのためにメッセージを更新
                     message = f"""
 元の質問: {original_message}
@@ -198,9 +218,9 @@ O1モデルの分析:
                     # ツールが不要な場合は直接回答
                     logger.info("ツール使用不要と判断、直接回答を返します")
                     return self._format_final_response(final_response, accumulated_results)
-                
+
                 iteration += 1
-            
+
             # 最大イテレーション回数に達した場合の最終評価
             logger.info("=== 最大イテレーション回数到達、最終評価実行 ===")
             final_prompt = f"""
@@ -214,7 +234,7 @@ O1モデルの分析:
 """
             final_thinking = await self.thinking_client.think(final_prompt, iteration=max_iterations)
             return self._format_final_response(final_thinking.content, accumulated_results)
-            
+
         except Exception as e:
             logger.error(f"Error processing message: {str(e)}", exc_info=True)
             return f"申し訳ありません。処理中にエラーが発生しました: {str(e)}"
