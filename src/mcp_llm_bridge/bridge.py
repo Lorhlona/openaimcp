@@ -153,15 +153,21 @@ class MCPLLMBridge:
                 logger.info(f"ツール使用の必要性: {thinking_response.needs_tool}")
                 logger.info(f"タスク完了状態: {thinking_response.task_completed}")
 
-                # 現在の応答を保存
+                # O1の応答タイプを取得
+                response_type = thinking_response._get_response_type()
                 final_response = thinking_response.content
+
+                # 応答タイプに基づいて処理を分岐
+                if response_type in ["会話応答", "ガイダンス"]:
+                    logger.info(f"{response_type}として処理します")
+                    return final_response
 
                 # タスクが完了している場合は終了
                 if thinking_response.task_completed:
                     logger.info("タスク完了、処理を終了します")
                     return self._format_final_response(final_response, accumulated_results)
 
-                # ツールの使用が必要か判断
+                # ツール操作が必要な場合
                 if thinking_response.needs_tool:
                     logger.info("=== GPT-4によるツール実行開始 ===")
 
