@@ -1,6 +1,8 @@
 from typing import Dict, List, Any, Optional
+import json
 import openai
 from mcp_llm_bridge.config import LLMConfig
+from mcp_llm_bridge.schemas import ThinkingResponse, TaskPlan, TaskPhase, Operation
 import logging
 import colorlog
 
@@ -22,93 +24,7 @@ handler.setFormatter(colorlog.ColoredFormatter(
 
 logger = colorlog.getLogger(__name__)
 logger.addHandler(handler)
-logger.setLevel(logging.DEBUG)  # DEBUGレベルに変更
-
-class ThinkingResponse:
-    """思考プロセスの応答フォーマット"""
-    def __init__(self, completion: Any):
-        self.completion = completion
-        self.content = completion.choices[0].message.content
-        self.task_completed = self._analyze_task_completion()
-        self.needs_tool = self._analyze_needs_tool() if not self.task_completed else False
-        logger.debug(f"生のレスポンス: {completion}")
-        logger.debug(f"処理済みコンテンツ: {self.content}")
-        
-    def _get_response_type(self) -> str:
-        """応答タイプを判断"""
-        if "【応答タイプ】" in self.content:
-            response_type_line = [line for line in self.content.split('\n') if "【応答タイプ】" in line][0]
-            return response_type_line.split("【応答タイプ】")[1].strip()
-        return "ツール操作"  # デフォルトは従来の動作
-
-    def _analyze_needs_tool(self) -> bool:
-        """思考内容からツール使用の必要性を判断"""
-        # タスクが完了している場合は常にFalse
-        if self.task_completed:
-            return False
-            
-        # 応答タイプに基づいて判断
-        response_type = self._get_response_type()
-        if response_type in ["会話応答", "ガイダンス"]:
-            return False
-
-        # ツール操作の場合は判断ロジック
-        tool_indicators = [
-            "データベースの検索が必要",
-            "情報を取得する必要があります",
-            "確認が必要です",
-            "調べる必要があります",
-            "追加の情報が必要です",
-            "データベースを確認する必要があります",
-            "検索が必要です",
-            "インターネットで調べる必要があります",
-            "オンライン情報が必要です",
-            "最新情報を取得する必要があります",
-            "【実行フェーズ】"  # フェーズ情報がある場合はツール使用が必要
-        ]
-        needs_tool = any(indicator in self.content.lower() for indicator in tool_indicators)
-        logger.debug(f"ツール使用の必要性判断: {needs_tool}")
-        return needs_tool
-
-    def _analyze_task_completion(self) -> bool:
-        """タスクが完了したかどうかを判断"""
-        # 完了を示す表現
-        completion_indicators = [
-            "タスクは完了しました",
-            "タスクは正常に完了しました",
-            "これで完了しました",
-            "追加が正常に完了しました",
-            "確認が完了しました",
-            "必要な情報が揃いました",
-            "十分な情報が得られました"
-        ]
-        
-        # 未完了を示す表現
-        incomplete_indicators = [
-            "追加の情報が必要です",
-            "さらなる確認が必要です",
-            "まだ完了していません",
-            "もう少し調査が必要です",
-            "情報が不十分です",
-            "確認できていません",
-            "さらなる検索が必要です",
-            "追加の検索が必要です"
-        ]
-        
-        is_complete = any(indicator in self.content.lower() for indicator in completion_indicators)
-        is_incomplete = any(indicator in self.content.lower() for indicator in incomplete_indicators)
-        
-        # 完了の表現があり、かつ未完了の表現がない場合にのみ完了とみなす
-        task_completed = is_complete and not is_incomplete
-        logger.debug(f"タスク完了判断: {task_completed}")
-        return task_completed
-
-    def get_message(self) -> Dict[str, Any]:
-        """標準化されたメッセージフォーマット"""
-        return {
-            "role": "assistant",
-            "content": self.content
-        }
+logger.setLevel(logging.DEBUG)
 
 class ThinkingClient:
     """O1モデル用の思考プロセス専用クライアント"""
@@ -119,149 +35,97 @@ class ThinkingClient:
             api_key=config.api_key,
             base_url=config.base_url
         )
-        self.messages = []
+        self.task_plan: Optional[TaskPlan] = None
         self._context = """
-あなたは与えられた入力を分析し、適切な応答方法を判断する思考エンジンです。
+あなたは高度な思考エンジンとして、ユーザーの要求を分析し、実行計画を立案します。
+応答は必ず以下のJSON形式で返してください：
 
-# 入力の分類と応答
-1. データベース操作が必要な場合:
-   - 商品情報の検索や確認
-   - カテゴリ情報の取得
-   - データベース内の情報分析
-   → データベースクエリを含む実行フェーズで応答
+{
+    "task_plan": {  // 初回のみ必須、2回目以降は省略可
+        "overall_tasks": [  // 達成すべきサブタスクのリスト
+            "ユーザーの求める情報の特定",
+            "必要なデータの収集",
+            "結果の集約と回答生成"
+        ],
+        "total_phases": 3,  // 予定される総フェーズ数
+        "phases": [  // 各フェーズの詳細
+            {
+                "phase_number": 1,
+                "operations": [
+                    {
+                        "type": "human_interaction",
+                        "parameters": {
+                            "question": "具体的にどのような情報をお探しですか？"
+                        }
+                    }
+                ],
+                "description": "ユーザーの意図を明確化"
+            }
+        ]
+    },
+    "current_phase": {  // 現在実行すべきフェーズの情報
+        "phase_number": 1,
+        "operations": [
+            {
+                "type": "human_interaction",
+                "parameters": {
+                    "question": "具体的にどのような情報をお探しですか？"
+                }
+            }
+        ],
+        "description": "ユーザーの意図を明確化"
+    },
+    "needs_tool": true,  // ツール使用の必要性
+    "task_completed": false,  // タスク完了状態
+    "final_response": null  // タスク完了時のみ設定
+}
 
-2. インターネット検索が必要な場合:
-   - 一般的な情報収集
-   - 最新情報の取得
-   - オンラインリソースの検索
-   → Google検索を含む実行フェーズで応答
+# 利用可能なツール
+1. human_interaction
+   - parameters: {"question": "質問文"}
+   - 制約: 1フェーズで1つの質問のみ
 
-3. 追加情報が必要な場合:
-   - 質問の意図が不明確
-   - 必要な情報が不足
-   - 対象の特定が必要
-   → 自然な対話形式でユーザーに質問
+2. database_query
+   - parameters: {"query": "SQLクエリ"}
+   - テーブル: products, categories
+   - 制約: 適切なSQLite構文
 
-4. 複合的な操作が必要な場合:
-   - データベース情報と外部情報の比較
-   - 商品情報の市場調査
-   - 競合分析
-   → 複数のツールを組み合わせた実行フェーズで応答
+3. google_search
+   - parameters: {"query": "検索文", "num_results": 件数}
+   - 制約: num_resultsは1-10の範囲
 
-4. 単純な会話の場合:
-   - 挨拶、感謝
-   - 一般的な雑談
-   → 直接応答形式で返答
+# 実行ルール
+1. 1フェーズで最大3つまでの操作
+2. human_interactionは単独で使用
+3. database_queryとgoogle_searchは組み合わせ可能
+4. 最大5フェーズまで
+5. 各フェーズは明確な目的が必要
 
-5. 空の入力や無意味な入力の場合:
-   → 適切なガイダンスを提供
-
-# 利用可能なツール情報
-1. ユーザーとの対話 (human_interaction)
-   - 自然な会話形式で質問
-   - 具体的な情報を1つずつ確認
-   - 質問の意図を明確に
-   - 例: "どの写真集をお探しですか？"
-
-2. データベース (database_query)
-   - products テーブル: 商品情報
-   - categories テーブル: カテゴリ情報
-
-3. Google検索 (google_search)
-   - クエリベースの検索
-   - 最大10件の結果取得
-   - 関連性の高い情報を優先
-
-# 制約事項（ツール操作時）
-1. ユーザーとの対話:
-   - 1フェーズで1つの質問のみ
-   - 自然な会話形式を維持
-   - 質問は具体的かつ明確に
-   - 情報不足時は最優先で使用
-
-2. データベース/検索操作の場合:
-   - 1フェーズで最大3つまでの操作
-   - データベースとGoogle検索の組み合わせ可
-   - 例: DBクエリ2回 + 検索1回
-
-3. フェーズ制限:
-   - 最大3フェーズまで（初回 + 2回の追加実行）
-   - 各フェーズは明確な目的が必要
-   - 対話フェーズは他のツールと分離
-
-4. 検索制限:
-   - 1回の検索で最大10件まで
-   - 具体的で焦点を絞ったクエリを使用
-
-# 応答フォーマット
-## ツール操作が必要な場合:
----
-【実行結果】
-（実行内容や取得データの要約）
-
-【タスク状態】
-タスクは完了しました。または追加の情報が必要です。
-
-【実行フェーズ】
-現在のフェーズ: X/Y
-実行すべき操作:
-1. [Human_Interaction] 自然な対話形式での質問
-または
-1. [DB/検索] 目的1の実行
-2. [DB/検索] 目的2の実行
-3. [DB/検索] 目的3の実行
-
-【詳細情報】
-（具体的な実行計画や結果の詳細）
----
-
-## 単純な会話の場合:
----
-【応答タイプ】
-会話応答
-
-【応答内容】
-（自然な会話形式での返答）
----
-
-## 空/無意味な入力の場合:
----
-【応答タイプ】
-ガイダンス
-
-【応答内容】
-（適切なガイダンスメッセージ）
----
+# エラー処理
+- 不正なJSON形式の場合は再プロンプト
+- 未定義のツール使用は禁止
+- パラメータの検証は必須
 """
         logger.info(f"ThinkingClient初期化完了: モデル={config.model}")
     
     async def think(self, context: str, tool_result: Optional[str] = None, iteration: int = 0) -> ThinkingResponse:
         """思考プロセスの実行"""
         logger.info(f"=== O1モデルの思考プロセス開始 (イテレーション: {iteration}) ===")
+        
         if tool_result:
             prompt = f"""
 {self._context}
 
-ユーザーからの質問や状況:
+ユーザーからの質問:
 {context}
 
 前回の実行結果:
 {tool_result}
 
-この情報を分析し、以下の点を評価してください：
-1. タスクは完全に完了したか
-2. 追加の情報や確認が必要か
-   - データベースからの追加情報が必要か
-   - インターネット検索による補完が必要か
-3. 現在の情報でユーザーに価値のある回答が可能か
-
-これはイテレーション{iteration}回目です（最大2回の追加実行が可能）。
-必要な場合は、「追加の情報が必要です」と明確に示してください。
-
-分析結果を元に、ユーザーにとって分かりやすい回答を作成してください。
-タスクが完了した場合は、「タスクは完了しました」と明確に示し、実行結果の要約も含めてください。
+これはイテレーション{iteration}回目です。
+前回の実行結果を分析し、次のフェーズの実行計画または最終応答を決定してください。
+タスクが完了した場合は、final_responseに結果をまとめてください。
 """
-            logger.info("ツール実行結果を含む思考プロセス")
         else:
             prompt = f"""
 {self._context}
@@ -269,50 +133,14 @@ class ThinkingClient:
 ユーザーからの質問:
 {context}
 
-この質問を以下のように分析してください：
+これは最初の分析です。
+1. まずタスク全体を分解し、必要なサブタスクを列挙
+2. 各フェーズで実行する操作を計画
+3. 最初のフェーズの実行計画を決定
 
-1. 必要なツール操作を特定（最大3つまで）:
-   - データベースクエリが必要か
-   - Google検索が必要か
-   - 両方のツールの組み合わせが効果的か
-   - ユーザーとの対話が必要か
-
-2. 各操作の目的を明確にする:
-   - データベース操作の場合は具体的なクエリ内容
-   - 検索操作の場合は検索キーワードと取得件数
-   - 対話の場合は具体的な質問内容
-
-3. 実行フェーズとして構造化する:
-   - フェーズ番号と目的
-   - 具体的な実行手順
-   - 期待される結果
-
-これはイテレーション{iteration}回目の分析です。
-必ず【実行フェーズ】セクションを含めて回答してください。
-
-例：
-【実行結果】
-商品情報の確認と市場調査が必要です。
-
-【タスク状態】
-追加の情報が必要です。
-
-【実行フェーズ】
-現在のフェーズ: 1/2
-実行すべき操作:
-1. [Human_Interaction] どの商品についての情報をお探しですか？
-または
-1. [DB] 商品情報の取得
-2. [検索] 市場価格の調査
-3. [DB] カテゴリ情報の確認
-
-【詳細情報】
-まずユーザーから具体的な情報を確認し、その後必要な情報を収集します。
+task_planとcurrent_phaseの両方を含むJSONで応答してください。
 """
-            logger.info("初期分析の思考プロセス")
-            
-        logger.debug(f"O1モデルへの入力プロンプト: {prompt}")
-            
+        
         try:
             logger.info("O1 APIリクエスト開始")
             completion = self.client.chat.completions.create(
@@ -321,15 +149,80 @@ class ThinkingClient:
                     "role": "user",
                     "content": prompt
                 }],
-                max_completion_tokens=32768  # O1モデルの推奨設定
+                max_completion_tokens=32768
             )
             logger.info("O1 APIリクエスト完了")
-            logger.debug(f"O1モデルからの生の応答: {completion}")
             
-            response = ThinkingResponse(completion)
-            logger.info(f"思考プロセスの結果: ツール使用必要={response.needs_tool}, タスク完了={response.task_completed}")
-            return response
-            
+            # レスポンスの解析と構造化
+            response_content = completion.choices[0].message.content
+            logger.debug(f"生の応答内容: {response_content}")
+
+            try:
+                # JSON形式の応答を探す
+                json_start = response_content.find('{')
+                json_end = response_content.rfind('}') + 1
+                
+                if json_start >= 0 and json_end > json_start:
+                    json_content = response_content[json_start:json_end]
+                    response_dict = json.loads(json_content)
+                else:
+                    # JSON形式でない場合は、構造化された応答を生成
+                    response_dict = {
+                        "current_phase": {
+                            "phase_number": 1,
+                            "operations": [
+                                {
+                                    "type": "human_interaction",
+                                    "parameters": {
+                                        "question": "具体的にどのような情報をお探しですか？"
+                                    }
+                                }
+                            ],
+                            "description": "ユーザーの意図を明確化"
+                        },
+                        "needs_tool": True,
+                        "task_completed": False,
+                        "final_response": None
+                    }
+                    if iteration == 0:
+                        response_dict["task_plan"] = {
+                            "overall_tasks": ["ユーザーの意図を明確化", "必要な情報の収集", "結果の整理と提示"],
+                            "total_phases": 3,
+                            "phases": [response_dict["current_phase"]]
+                        }
+
+                # Pydanticモデルに変換
+                thinking_response = ThinkingResponse(**response_dict)
+                
+                # 初回の場合はタスク計画を保存
+                if iteration == 0 and thinking_response.task_plan:
+                    self.task_plan = thinking_response.task_plan
+                
+                logger.info(f"思考プロセスの結果: ツール使用必要={thinking_response.needs_tool}, タスク完了={thinking_response.task_completed}")
+                return thinking_response
+                
+            except Exception as e:
+                logger.error(f"応答の解析でエラー: {str(e)}")
+                # エラー時はデフォルトの応答を返す
+                default_response = ThinkingResponse(**{
+                    "current_phase": {
+                        "phase_number": 1,
+                        "operations": [
+                            {
+                                "type": "human_interaction",
+                                "parameters": {
+                                    "question": "申し訳ありません。もう一度具体的に教えていただけますか？"
+                                }
+                            }
+                        ],
+                        "description": "ユーザーの意図を再確認"
+                    },
+                    "needs_tool": True,
+                    "task_completed": False,
+                    "final_response": None
+                })
+                return default_response
+                
         except Exception as e:
             logger.error(f"思考プロセスでエラー発生: {str(e)}")
             raise

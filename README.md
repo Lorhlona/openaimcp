@@ -1,121 +1,67 @@
 # MCP LLM Bridge
 
-ユーザーの質問に対して、O1モデルとGPT-4を組み合わせて高度な思考プロセスを実現するAIシステムです。
+GPT-4とO1-miniを組み合わせた高度な対話システム。タスクを構造化し、複数のツールを組み合わせて効果的な情報検索と提供を実現します。
 
-## 主な機能
+## 特徴
 
-### 1. 思考プロセス
-- O1モデルによる質問の分析と実行計画の立案
-- GPT-4による具体的なツール実行
-- 段階的な情報収集と結果の分析
+- O1-miniによる構造化された思考プロセス
+- GPT-4による効率的なツール実行
+- データベース、検索、対話の統合
+- フェーズベースの実行管理
+- 堅牢なエラーハンドリング
 
-### 2. 利用可能なツール
-- **ユーザーとの対話** (human_interaction)
-  - 自然な会話形式での質問
-  - 具体的な情報の収集
-  - 意図の明確化
+## アーキテクチャ
 
-- **Google検索** (google_search)
-  - インターネットからの情報収集
-  - 最大10件の関連結果取得
-  - 具体的なキーワードによる検索
+1. 思考エンジン（O1-mini）
+   - タスクの分解と構造化
+   - 実行計画の立案
+   - 結果の分析
 
-- **データベースクエリ** (database_query)
-  - SQLiteデータベースへのクエリ実行
-  - 商品情報やカテゴリ情報の取得
-  - データの分析と集計
+2. 実行エンジン（GPT-4）
+   - データベースクエリ
+   - Google検索
+   - ユーザー対話
 
-### 3. 使用例
+## 使用例
 
-```bash
-Enter your prompt (or 'quit' to exit): AAの曲名なんだったっけな
+```
+Enter your prompt: FF11のAAって敵キャラがいるんだけどそいつと戦うときのBGMの情報をしりたいの
 
-🤖 AAとはどのアーティストやグループを指していますか？
-👤 FF11のアークエンジェルつまりAAと戦うときの曲だよ
+🤖 具体的にどのような情報をお探しですか？
+👤 うーんとね、FF11のAAって敵キャラがいるんだけどそいつと戦うときのBGMの情報をしりたいの
 
-【実行結果】
-FF11のアークエンジェル戦で流れる曲は「Fighters of the Crystal」です。
-作曲者は水田直志氏です。
+Response: FF11のAAとの戦闘時のBGMは「Fighters of the Crystal」です。詳細については以下のリンクをご参照ください。
+1. [ヴァナ・ディール音楽紀行#2](https://www.youtube.com/watch?v=zh1oMAhjy-k)
+2. [FFXI 戦闘曲集](https://www.youtube.com/playlist?list=PLDrtyx_shpKNMUzTdQqtyvebZBQ-QyVTm)
 ```
 
-このように、ユーザーの曖昧な質問に対して：
-1. まず質問で対話的に意図を明確化
-2. 必要に応じてGoogle検索やデータベース検索を実行
-3. 収集した情報を分析して最終的な回答を提供
+## 技術スタック
 
-## セットアップ
+- Python 3.12+
+- OpenAI API (GPT-4)
+- O1-mini
+- SQLite
+- Pydantic
+- asyncio/aiohttp
 
+## 起動方法
+
+Windows:
 ```bash
-# Install
-curl -LsSf https://astral.sh/uv/install.sh | sh
-git clone https://github.com/bartolli/mcp-llm-bridge.git
 cd mcp-llm-bridge
-uv venv
-source .venv/bin/activate  # Linux/Mac
-# または
-.\.venv\Scripts\Activate.ps1  # Windows
-uv pip install -e .
-
-# Create test database
-python -m mcp_llm_bridge.create_test_db
-```
-
-## 設定
-
-### OpenAI API設定
-
-`.env`ファイルを作成：
-
-```bash
-OPENAI_API_KEY=your_key
-OPENAI_MODEL=gpt-4o  # Function Calling対応モデル
-```
-
-### Additional Endpoint Support
-
-The bridge also works with any endpoint implementing the OpenAI API specification:
-
-#### Ollama
-
-```python
-llm_config=LLMConfig(
-    api_key="not-needed",
-    model="mistral-nemo:12b-instruct-2407-q8_0",
-    base_url="http://localhost:11434/v1"
-)
-```
-
-Note: After testing various models, including `llama3.2:3b-instruct-fp16`, I found that `mistral-nemo:12b-instruct-2407-q8_0` handles complex queries more effectively.
-
-#### LM Studio
-
-```python
-llm_config=LLMConfig(
-    api_key="not-needed",
-    model="local-model",
-    base_url="http://localhost:1234/v1"
-)
-```
-
-I didn't test this, but it should work.
-
-### 実行
-
-```bash
+.\.venv\Scripts\activate
 python -m mcp_llm_bridge.main
+```
+
+Linux/Mac:
+```bash
+cd mcp-llm-bridge; source .venv/bin/activate; python -m mcp_llm_bridge.main
 ```
 
 ## ライセンス
 
-[MIT](LICENSE.md)
+MIT
 
 ## 貢献
 
-PRs welcome.
-
-cd mcp-llm-bridge ; .venv/Scripts/activate ; python -m mcp_llm_bridge.main
-
-
-cd mcp-llm-bridge
-.\.venv\Scripts\Activate.ps1
-python -m mcp_llm_bridge.main
+PRs welcome
