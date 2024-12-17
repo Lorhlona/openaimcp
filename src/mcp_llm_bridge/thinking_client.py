@@ -158,13 +158,80 @@ task_planとcurrent_phaseの両方を含むJSONで応答してください。
             logger.debug(f"生の応答内容: {response_content}")
 
             try:
+                # マークダウンのコードブロック記法を除去
+                content = response_content.strip()
+                if '```json' in content:
+                    parts = content.split('```json')
+                    if len(parts) > 1:
+                        content = parts[1]
+                if '```' in content:
+                    parts = content.split('```')
+                    if len(parts) > 1:
+                        content = parts[0]
+                content = content.strip()
+                
                 # JSON形式の応答を探す
-                json_start = response_content.find('{')
-                json_end = response_content.rfind('}') + 1
+                json_start = content.find('{')
+                json_end = content.rfind('}') + 1
                 
                 if json_start >= 0 and json_end > json_start:
-                    json_content = response_content[json_start:json_end]
+                    json_content = content[json_start:json_end].strip()
+                    
+                    try:
+                        # コメントの除去（//で始まる行を削除）
+                        json_lines = [line for line in json_content.split('\n') if not line.strip().startswith('//')]
+                        json_content = '\n'.join(json_lines)
+                        
+                        # 制御文字と改行の正規化
+                        json_content = json_content.replace('\n', ' ')
+                        json_content = json_content.replace('\r', ' ')
+                        json_content = json_content.replace('\t', ' ')
+                        
+                        # 文字列内のスペースを一時的に置換
+                        import re
+                        def replace_spaces_in_strings(match):
+                            return '"' + match.group(1).replace(' ', '_SPACE_') + '"'
+                        json_content = re.sub(r'"([^"]*)"', replace_spaces_in_strings, json_content)
+                        
+                        # 連続する空白を1つに
+                        json_content = ' '.join(json_content.split())
+                        
+                        # 不正なJSONの修正
+                        json_content = json_content.replace("'", '"')
+                        
+                        # 文字列内のスペースを復元
+                        json_content = json_content.replace('_SPACE_', ' ')
+                    except Exception as e:
+                        logger.error(f"JSON前処理でエラー: {str(e)}")
+                        raise
+                    
+                    # final_responseのテキスト処理
+                    try:
+                        temp_dict = json.loads(json_content)
+                        if temp_dict.get('final_response'):
+                            final_response = temp_dict['final_response']
+                            # リストの場合は文字列に変換
+                            if isinstance(final_response, list):
+                                final_response = json.dumps(final_response, ensure_ascii=False)
+                            # 文字列の場合は改行を処理
+                            elif isinstance(final_response, str):
+                                final_response = final_response.replace('\n', '\\n')
+                            temp_dict['final_response'] = final_response
+                            json_content = json.dumps(temp_dict)
+                    except Exception as e:
+                        logger.error(f"final_response処理でエラー: {str(e)}")
+                    
                     response_dict = json.loads(json_content)
+                    
+                    # 必須フィールドの確認と追加
+                    if 'needs_tool' not in response_dict:
+                        response_dict['needs_tool'] = False
+                    if 'current_phase' not in response_dict:
+                        response_dict['current_phase'] = None
+                    
+                    # final_responseの改行を復元
+                    if response_dict.get('final_response'):
+                        response_dict['final_response'] = response_dict['final_response'].replace('\\n', '\n')
                 else:
                     # JSON形式でない場合は、構造化された応答を生成
                     response_dict = {
@@ -203,6 +270,16 @@ task_planとcurrent_phaseの両方を含むJSONで応答してください。
                 
             except Exception as e:
                 logger.error(f"応答の解析でエラー: {str(e)}")
+                logger.error(f"問題のある応答内容: {response_content}")
+                
+                try:
+                    # JSON解析エラーの詳細を記録
+                    if isinstance(e, json.JSONDecodeError):
+                        logger.error(f"JSON解析エラーの位置: {e.pos}")
+                        logger.error(f"エラー前後の文字列: {e.doc[max(0, e.pos-50):min(len(e.doc), e.pos+50)]}")
+                except:
+                    pass
+                
                 # エラー時はデフォルトの応答を返す
                 default_response = ThinkingResponse(**{
                     "current_phase": {
@@ -211,11 +288,11 @@ task_planとcurrent_phaseの両方を含むJSONで応答してください。
                             {
                                 "type": "human_interaction",
                                 "parameters": {
-                                    "question": "申し訳ありません。もう一度具体的に教えていただけますか？"
+                                    "question": "申し訳ありません。応答の処理中にエラーが発生しました。もう一度お試しください。"
                                 }
                             }
                         ],
-                        "description": "ユーザーの意図を再確認"
+                        "description": "エラーからの回復"
                     },
                     "needs_tool": True,
                     "task_completed": False,

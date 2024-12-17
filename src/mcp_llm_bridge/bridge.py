@@ -266,28 +266,49 @@ class MCPLLMBridge:
 
     def _format_final_response(self, results: List[ExecutionResult]) -> str:
         """Format the final response with execution results"""
-        response = "【実行結果】\n"
-        
-        if not results:
-            return response + "実行結果がありません。"
-        
-        for result in results:
-            response += f"\n{result.operation_type}の実行結果:\n"
-            if result.success:
-                if isinstance(result.result, str):
-                    try:
-                        parsed_result = json.loads(result.result)
-                        response += json.dumps(parsed_result, ensure_ascii=False, indent=2)
-                    except:
-                        response += result.result
-                else:
-                    response += json.dumps(result.result, ensure_ascii=False, indent=2)
-            else:
-                response += f"エラー: {result.error}\n"
+        # 最後の結果を確認
+        if results and results[-1].success and results[-1].result:
+            last_result = results[-1]
             
-            response += "\n"
+            # Google検索結果の場合
+            if last_result.operation_type == "google_search":
+                try:
+                    search_results = last_result.result
+                    if isinstance(search_results, str):
+                        search_results = json.loads(search_results)
+                    
+                    response = "検索結果:\n\n"
+                    for item in search_results:
+                        if isinstance(item, dict):
+                            title = item.get('title', '')
+                            price_info = None
+                            
+                            # スニペットから価格情報を抽出
+                            snippet = item.get('snippet', '')
+                            if '円' in snippet:
+                                price_start = max(snippet.rfind('￥'), snippet.rfind('¥'))
+                                if price_start != -1:
+                                    price_end = snippet.find('円', price_start) + 1
+                                    if price_end > price_start:
+                                        price_info = snippet[price_start:price_end]
+                            
+                            if price_info:
+                                response += f"・{title}: {price_info}\n"
+                    
+                    return response
+                except:
+                    pass
+            
+            # その他の結果の場合はデフォルトフォーマットを使用
+            try:
+                if isinstance(last_result.result, str):
+                    return json.loads(last_result.result)
+                return last_result.result
+            except:
+                return str(last_result.result)
         
-        return response
+        # エラーまたは結果がない場合
+        return "申し訳ありません。結果を取得できませんでした。"
 
     async def close(self):
         """Clean up resources"""
