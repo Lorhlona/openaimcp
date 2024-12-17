@@ -11,26 +11,30 @@ from mcp_llm_bridge.config import BridgeConfig
 import logging
 import colorlog
 from mcp_llm_bridge.tools import DatabaseQueryTool, GoogleSearchTool, HumanTool
+from mcp_llm_bridge.voice_manager import VoiceManager
 
-handler = colorlog.StreamHandler()
-handler.setFormatter(colorlog.ColoredFormatter(
-    "%(log_color)s%(levelname)s%(reset)s:     %(cyan)s%(name)s%(reset)s - %(message)s",
-    datefmt=None,
-    reset=True,
-    log_colors={
-        'DEBUG': 'cyan',
-        'INFO': 'green',
-        'WARNING': 'yellow',
-        'ERROR': 'red',
-        'CRITICAL': 'red,bg_white',
-    },
-    secondary_log_colors={},
-    style='%'
-))
+# ルートロガーの設定
+root_logger = logging.getLogger()
+if not root_logger.handlers:
+    handler = colorlog.StreamHandler()
+    handler.setFormatter(colorlog.ColoredFormatter(
+        "%(log_color)s%(levelname)s%(reset)s:     %(cyan)s%(name)s%(reset)s - %(message)s",
+        datefmt=None,
+        reset=True,
+        log_colors={
+            'DEBUG': 'cyan',
+            'INFO': 'green',
+            'WARNING': 'yellow',
+            'ERROR': 'red',
+            'CRITICAL': 'red,bg_white',
+        },
+        secondary_log_colors={},
+        style='%'
+    ))
+    root_logger.addHandler(handler)
+    root_logger.setLevel(logging.DEBUG)
 
-logger = colorlog.getLogger(__name__)
-logger.addHandler(handler)
-logger.setLevel(logging.DEBUG)
+logger = logging.getLogger(__name__)
 
 class MCPLLMBridge:
     """Bridge between MCP protocol and LLM client with structured thinking process"""
@@ -43,6 +47,14 @@ class MCPLLMBridge:
         self.query_tool = DatabaseQueryTool("test.db")
         self.search_tool = GoogleSearchTool()
         self.human_tool = HumanTool()
+        
+        # 音声マネージャーの初期化
+        try:
+            self.voice_manager = VoiceManager()
+            logger.info("音声マネージャーの初期化成功")
+        except Exception as e:
+            self.voice_manager = None
+            logger.error(f"音声マネージャーの初期化失敗: {str(e)}")
         
         # ツール実行用のプロンプトを生成
         self._create_tool_prompt()
@@ -192,9 +204,22 @@ class MCPLLMBridge:
                 
                 # タスクが完了している場合
                 if thinking_response.task_completed:
-                    if thinking_response.final_response:
-                        return thinking_response.final_response
-                    return self._format_final_response(accumulated_results)
+                    final_response = thinking_response.final_response
+                    if not final_response:
+                        final_response = self._format_final_response(accumulated_results)
+                    if not final_response:
+                        final_response = "申し訳ありません。応答を生成できませんでした。"
+                    
+                    # 音声出力を試みる
+                    if final_response and self.voice_manager and self.voice_manager.is_voice_enabled():
+                        try:
+                            logger.debug("音声出力を開始します")
+                            self.voice_manager.process_text(final_response)
+                            logger.debug("音声出力が完了しました")
+                        except Exception as e:
+                            logger.error(f"音声出力でエラー: {str(e)}")
+                    
+                    return final_response
                 
                 # ツール実行が必要な場合
                 if thinking_response.needs_tool and thinking_response.current_phase:
@@ -209,17 +234,24 @@ class MCPLLMBridge:
                     )
                 else:
                     # ツールが不要な場合は直接応答
-                    return thinking_response.final_response or "応答を生成できませんでした。"
+                    final_response = thinking_response.final_response
+                    if not final_response:
+                        final_response = "申し訳ありません。応答を生成できませんでした。"
+                    
+                    # 音声出力を試みる
+                    if final_response and self.voice_manager and self.voice_manager.is_voice_enabled():
+                        try:
+                            logger.debug("音声出力を開始します")
+                            self.voice_manager.process_text(final_response)
+                            logger.debug("音声出力が完了しました")
+                        except Exception as e:
+                            logger.error(f"音声出力でエラー: {str(e)}")
+                    
+                    return final_response
                 
                 iteration += 1
             
-            # 最大イテレーション到達時の最終評価
-            final_thinking = await self.thinking_client.think(
-                message,
-                json.dumps([result.dict() for result in accumulated_results], ensure_ascii=False, indent=2),
-                max_iterations
-            )
-            return final_thinking.final_response or self._format_final_response(accumulated_results)
+            return "タスクを完了できませんでした。"
             
         except Exception as e:
             logger.error(f"Error processing message: {str(e)}", exc_info=True)
@@ -281,21 +313,11 @@ class MCPLLMBridge:
                     for item in search_results:
                         if isinstance(item, dict):
                             title = item.get('title', '')
-                            price_info = None
-                            
-                            # スニペットから価格情報を抽出
                             snippet = item.get('snippet', '')
-                            if '円' in snippet:
-                                price_start = max(snippet.rfind('￥'), snippet.rfind('¥'))
-                                if price_start != -1:
-                                    price_end = snippet.find('円', price_start) + 1
-                                    if price_end > price_start:
-                                        price_info = snippet[price_start:price_end]
-                            
-                            if price_info:
-                                response += f"・{title}: {price_info}\n"
+                            if title and snippet:
+                                response += f"・{title}\n{snippet}\n\n"
                     
-                    return response
+                    return response.strip()
                 except:
                     pass
             
@@ -303,7 +325,7 @@ class MCPLLMBridge:
             try:
                 if isinstance(last_result.result, str):
                     return json.loads(last_result.result)
-                return last_result.result
+                return str(last_result.result)
             except:
                 return str(last_result.result)
         

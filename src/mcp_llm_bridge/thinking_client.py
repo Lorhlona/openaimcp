@@ -5,6 +5,7 @@ from mcp_llm_bridge.config import LLMConfig
 from mcp_llm_bridge.schemas import ThinkingResponse, TaskPlan, TaskPhase, Operation
 import logging
 import colorlog
+import re
 
 handler = colorlog.StreamHandler()
 handler.setFormatter(colorlog.ColoredFormatter(
@@ -25,6 +26,59 @@ handler.setFormatter(colorlog.ColoredFormatter(
 logger = colorlog.getLogger(__name__)
 logger.addHandler(handler)
 logger.setLevel(logging.DEBUG)
+
+def fix_json_content(content: str) -> str:
+    """JSONコンテンツを修正"""
+    # コメントの除去（//で始まる行を削除）
+    json_lines = [line for line in content.split('\n') if not line.strip().startswith('//')]
+    content = '\n'.join(json_lines)
+    
+    # 制御文字と改行の正規化
+    content = content.replace('\n', ' ')
+    content = content.replace('\r', ' ')
+    content = content.replace('\t', ' ')
+    
+    # SQLクエリ内のダブルクォートをシングルクォートに変換
+    def replace_sql_quotes(match):
+        sql = match.group(1)
+        return '"query": "' + sql.replace('"', "'") + '"'
+    content = re.sub(r'"query"\s*:\s*"([^"]*)"', replace_sql_quotes, content)
+    
+    # 文字列内のスペースを一時的に置換
+    def replace_spaces_in_strings(match):
+        return '"' + match.group(1).replace(' ', '_SPACE_') + '"'
+    content = re.sub(r'"([^"]*)"', replace_spaces_in_strings, content)
+    
+    # 連続する空白を1つに
+    content = ' '.join(content.split())
+    
+    # カンマの欠落を修正
+    content = re.sub(r'}\s*{', "}, {", content)
+    content = re.sub(r']\s*{', "], {", content)
+    content = re.sub(r'}\s*]', "}]", content)
+    content = re.sub(r'"\s*{', '", {', content)
+    content = re.sub(r'(["\d])\s*]', r'\1]', content)
+    content = re.sub(r'\[\s*(["{])', r'[\1', content)
+    
+    # オブジェクトのプロパティ間のカンマを追加
+    content = re.sub(r'"\s+(?=")', '", ', content)
+    content = re.sub(r'true\s+(?=")', 'true, ', content)
+    content = re.sub(r'false\s+(?=")', 'false, ', content)
+    content = re.sub(r'null\s+(?=")', 'null, ', content)
+    content = re.sub(r'}\s+(?=")', '}, ', content)
+    content = re.sub(r']\s+(?=")', '], ', content)
+    
+    # 配列要素間のカンマを追加
+    content = re.sub(r'"([^"]+)"\s+(?=(?:[^"]*"[^"]*")*[^"]*$)', r'"\1", ', content)
+    content = re.sub(r'}\s+(?=(?:[^"]*"[^"]*")*[^"]*\])', '}, ', content)
+    
+    # 文字列内のスペースを復元
+    content = content.replace('_SPACE_', ' ')
+    
+    # 最後のカンマを削除（配列やオブジェクトの最後の要素の後のカンマを削除）
+    content = re.sub(r',(\s*[}\]])', r'\1', content)
+    
+    return content
 
 class ThinkingClient:
     """O1モデル用の思考プロセス専用クライアント"""
@@ -88,7 +142,7 @@ class ThinkingClient:
 2. database_query
    - parameters: {"query": "SQLクエリ"}
    - テーブル: products, categories
-   - 制約: 適切なSQLite構文
+   - 制約: 適切なSQLite構文、シングルクォートを使用
 
 3. google_search
    - parameters: {"query": "検索文", "num_results": 件数}
@@ -100,6 +154,7 @@ class ThinkingClient:
 3. database_queryとgoogle_searchは組み合わせ可能
 4. 最大5フェーズまで
 5. 各フェーズは明確な目的が必要
+6. SQLクエリではシングルクォートを使用すること
 
 # エラー処理
 - 不正なJSON形式の場合は再プロンプト
@@ -125,6 +180,7 @@ class ThinkingClient:
 これはイテレーション{iteration}回目です。
 前回の実行結果を分析し、次のフェーズの実行計画または最終応答を決定してください。
 タスクが完了した場合は、final_responseに結果をまとめてください。
+必ずカンマで要素を区切り、SQLクエリではシングルクォートを使用してください。
 """
         else:
             prompt = f"""
@@ -139,6 +195,7 @@ class ThinkingClient:
 3. 最初のフェーズの実行計画を決定
 
 task_planとcurrent_phaseの両方を含むJSONで応答してください。
+必ずカンマで要素を区切り、SQLクエリではシングルクォートを使用してください。
 """
         
         try:
@@ -178,35 +235,10 @@ task_planとcurrent_phaseの両方を含むJSONで応答してください。
                     json_content = content[json_start:json_end].strip()
                     
                     try:
-                        # コメントの除去（//で始まる行を削除）
-                        json_lines = [line for line in json_content.split('\n') if not line.strip().startswith('//')]
-                        json_content = '\n'.join(json_lines)
+                        # JSONコンテンツの修正
+                        json_content = fix_json_content(json_content)
                         
-                        # 制御文字と改行の正規化
-                        json_content = json_content.replace('\n', ' ')
-                        json_content = json_content.replace('\r', ' ')
-                        json_content = json_content.replace('\t', ' ')
-                        
-                        # 文字列内のスペースを一時的に置換
-                        import re
-                        def replace_spaces_in_strings(match):
-                            return '"' + match.group(1).replace(' ', '_SPACE_') + '"'
-                        json_content = re.sub(r'"([^"]*)"', replace_spaces_in_strings, json_content)
-                        
-                        # 連続する空白を1つに
-                        json_content = ' '.join(json_content.split())
-                        
-                        # 不正なJSONの修正
-                        json_content = json_content.replace("'", '"')
-                        
-                        # 文字列内のスペースを復元
-                        json_content = json_content.replace('_SPACE_', ' ')
-                    except Exception as e:
-                        logger.error(f"JSON前処理でエラー: {str(e)}")
-                        raise
-                    
-                    # final_responseのテキスト処理
-                    try:
+                        # final_responseのテキスト処理
                         temp_dict = json.loads(json_content)
                         if temp_dict.get('final_response'):
                             final_response = temp_dict['final_response']
@@ -219,7 +251,8 @@ task_planとcurrent_phaseの両方を含むJSONで応答してください。
                             temp_dict['final_response'] = final_response
                             json_content = json.dumps(temp_dict)
                     except Exception as e:
-                        logger.error(f"final_response処理でエラー: {str(e)}")
+                        logger.error(f"JSON前処理でエラー: {str(e)}")
+                        raise
                     
                     response_dict = json.loads(json_content)
                     

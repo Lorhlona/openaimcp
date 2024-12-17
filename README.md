@@ -53,12 +53,15 @@ cd mcp-llm-bridge
 python -m mcp_llm_bridge.main
 ```
 
+なっちゃんの写真集の値段３つくらいぐぐってきてよ、なっちゃんっていうのは、、、
+
 Linux/Mac:
 ```bash
 cd mcp-llm-bridge; source .venv/bin/activate; python -m mcp_llm_bridge.main
 ```
 
 ## ライセンス
+
 
 MIT
 
