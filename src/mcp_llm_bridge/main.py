@@ -65,20 +65,37 @@ async def main():
     
     # コンテキストマネージャーを使用してブリッジを実行
     async with BridgeManager(config) as bridge:
+        iteration_count = 1
+
         while True:
-            try:
-                user_input = input("\nEnter your prompt (or 'quit' to exit): ")
-                if user_input.lower() in ['quit', 'exit', 'q']:
-                    break
-                    
-                response = await bridge.process_message(user_input)
-                print(f"\nResponse: {response}")
-                
-            except KeyboardInterrupt:
-                logger.info("\nExiting...")
+            current_summary = bridge.summarize_context()
+            logger.info("== 要約 ==")
+            logger.info(current_summary)
+            print("== 要約 ==")
+            print(current_summary)
+
+            user_input = input("\nEnter your prompt (or 'quit' to exit): ")
+            if user_input.lower() in ['quit', 'exit', 'q']:
                 break
-            except Exception as e:
-                logger.error(f"\nError occurred: {e}")
+
+            combined_input = f"{current_summary}\n\nユーザーの入力: {user_input}"
+
+            logger.info(f"=== Iteration {iteration_count} start ===")
+
+            response = await bridge.process_message(combined_input)
+
+            logger.info(f"=== Iteration {iteration_count} completed ===")
+            logger.info(f"Got response: {response}")
+
+            print(f"\nResponse: {response}")
+
+            if not bridge.is_task_completed:
+                new_summary = bridge.summarize_context()
+                bridge.context_summary = new_summary
+            else:
+                break
+
+            iteration_count += 1
 
 if __name__ == "__main__":
     asyncio.run(main())

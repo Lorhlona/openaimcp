@@ -1,103 +1,103 @@
 import os
-import requests
-import logging
 import tempfile
+import logging
+import requests
 import pygame
-import time
-import json
+import atexit
+from typing import Optional
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
 
 class VoiceManager:
-    """にじボイスAPIを使用した音声出力管理クラス"""
+    """音声出力を管理するクラス"""
     
     def __init__(self):
+        """音声マネージャーの初期化"""
         self.api_key = os.getenv("NIJIVOICE_API_KEY")
-        if not self.api_key:
-            logger.warning("NIJIVOICE_API_KEY is not set. Voice output will be disabled.")
+        self.voice_mode = os.getenv("VOICE_MODE", "true").lower() == "true"
+        self._temp_files = []  # 一時ファイルのリストを保持
         
-        # 音声モードの初期状態はオフ
-        self.voice_mode = os.getenv("VOICE_MODE", "off").lower() == "on"
+        # 終了時に一時ファイルを削除するための登録
+        atexit.register(self._cleanup_temp_files)
         
-        # 固定の音声ID（モデルさん）
-        self.voice_actor_id = os.getenv("VOICE_ACTOR_ID", "1fc717fe-ebf9-402b-9d8c-c59cda93d5dc")
-        
-        # APIエンドポイント
-        self.api_base_url = os.getenv("NIJIVOICE_API_BASE_URL", "https://api.nijivoice.com/api/platform/v1")
-        
+        # Pygameの初期化
         try:
-            # pygameの初期化（より詳細な設定）
-            pygame.mixer.quit()  # 既存のミキサーをクリーンアップ
-            pygame.mixer.init(frequency=44100, size=-16, channels=2, buffer=4096)
+            pygame.mixer.init()
             logger.info("Pygame mixer initialized successfully")
         except Exception as e:
-            logger.error(f"Failed to initialize pygame mixer: {str(e)}")
+            logger.error(f"Failed to initialize Pygame mixer: {str(e)}")
+            raise
 
-    def verify_mp3_data(self, data: bytes) -> bool:
-        """MP3データの検証"""
-        try:
-            # MP3ヘッダーをチェック
-            # ID3v2ヘッダー
-            if data.startswith(b'ID3'):
-                logger.debug("ID3v2 header detected")
-                return True
-            # MP3フレームヘッダー
-            elif data.startswith(b'\xFF\xFB') or data.startswith(b'\xFF\xFA'):
-                logger.debug("MP3 frame header detected")
-                return True
-            # データの長さをチェック
-            elif len(data) > 1024:  # 最小サイズ
-                logger.debug("Data size check passed")
-                return True
-            
-            logger.error("MP3 header not found")
-            return False
-        except Exception as e:
-            logger.error(f"Error verifying MP3 data: {str(e)}")
-            return False
-    
     def is_voice_enabled(self) -> bool:
         """音声出力が有効かどうかを確認"""
-        enabled = self.voice_mode and self.api_key is not None
-        logger.debug(f"Voice enabled: {enabled} (mode: {self.voice_mode}, api_key: {'set' if self.api_key else 'not set'})")
-        return enabled
-    
-    def set_voice_mode(self, enabled: bool):
-        """音声モードの切り替え"""
-        self.voice_mode = enabled
-        # 環境変数を更新（次回起動時も保持される）
-        os.environ["VOICE_MODE"] = "on" if enabled else "off"
-        logger.info(f"Voice mode {'enabled' if enabled else 'disabled'}")
-    
-    def process_text(self, text: str) -> bool:
-        """テキストを処理して音声を生成し再生"""
-        if not text:
-            logger.warning("Empty text provided")
-            return False
+        return self.voice_mode and self.api_key is not None
+
+    def process_text(self, text: str) -> Optional[str]:
+        """テキストを音声に変換して再生"""
+        if not self.is_voice_enabled():
+            return None
             
         logger.debug(f"Processing text: {text}")
-        voice_data = self.generate_voice(text)
-        if voice_data:
-            if self.verify_mp3_data(voice_data):
-                return self.play_voice(voice_data)
-            else:
-                logger.error("Generated data is not a valid MP3")
-        return False
-    
-    def generate_voice(self, text: str) -> bytes | None:
-        """テキストから音声を生成"""
-        if not self.is_voice_enabled():
-            logger.warning("Voice generation is disabled")
-            return None
-            
-        if not text:
-            logger.warning("Empty text provided for voice generation")
-            return None
-            
+        logger.debug(f"Voice enabled: {self.is_voice_enabled()} (mode: {self.voice_mode}, api_key: {'set' if self.api_key else 'not set'})")
+        
         try:
-            # テキストを500文字以内に制限
-            if len(text) > 500:
+            # APIリクエストを送信
+            url = "https://api.nijivoice.com/api/platform/v1/voice-actors/1fc717fe-ebf9-402b-9d8c-c59cda93d5dc/generate-voice"
+            headers = {
+                "x-api-key": self.api_key,
+                "accept": "application/json",
+                "content-type": "application/json"
+            }
+            payload = {
+                "script": text,
+                "speed": "1.0",
+                "format": "mp3"
+            }
+            
+            logger.debug(f"Sending request to {url}")
+            logger.debug(f"Headers: {headers}")
+            logger.debug(f"Payload: {payload}")
+            
+            response = requests.post(url, headers=headers, json=payload)
+            logger.debug(f"Response status code: {response.status_code}")
+            logger.debug(f"Response headers: {response.headers}")
+            logger.debug(f"Response content type: {response.headers.get('content-type')}")
+            
+            if response.status_code == 200:
+                response_json = response.json()
+                logger.debug(f"JSON response: {response_json}")
+                
+                if audio_url := response_json.get("generatedVoice", {}).get("audioFileUrl"):
+                    logger.debug(f"Found audio URL: {audio_url}")
+                    
+                    # 音声データをダウンロード
+                    audio_response = requests.get(audio_url)
+                    if audio_response.status_code == 200:
+                        audio_data = audio_response.content
+                        logger.debug("Successfully downloaded audio data")
+                        
+                        # データサイズの確認
+                        if len(audio_data) > 0:
+                            logger.debug("Data size check passed")
+                            
+                            # 一時ファイルを作成
+                            temp_file = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
+                            temp_file.write(audio_data)
+                            temp_file.close()
+                            self._temp_files.append(temp_file.name)  # 一時ファイルを記録
+                            
+                            logger.debug(f"Temporary file created at: {temp_file.name}")
+                            
+                            # 音声を再生
+                            try:
+                                pygame.mixer.music.load(temp_file.name)
+                                pygame.mixer.music.play()
+                                while pygame.mixer.music.get_busy():
+                                    pygame.time.Clock().tick(10)
+                            except Exception as e:
+                                logger.error(f"Error playing audio: {str(e)}")
+                                raise
+                            
                 text = text[:497] + "..."
             
             url = f"{self.api_base_url}/voice-actors/{self.voice_actor_id}/generate-voice"

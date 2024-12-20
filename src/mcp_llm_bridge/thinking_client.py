@@ -1,31 +1,12 @@
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Union
 import json
 import openai
 from mcp_llm_bridge.config import LLMConfig
 from mcp_llm_bridge.schemas import ThinkingResponse, TaskPlan, TaskPhase, Operation
 import logging
-import colorlog
 import re
 
-handler = colorlog.StreamHandler()
-handler.setFormatter(colorlog.ColoredFormatter(
-    "%(log_color)s%(levelname)s%(reset)s:     %(cyan)s%(name)s%(reset)s - %(message)s",
-    datefmt=None,
-    reset=True,
-    log_colors={
-        'DEBUG': 'cyan',
-        'INFO': 'green',
-        'WARNING': 'yellow',
-        'ERROR': 'red',
-        'CRITICAL': 'red,bg_white',
-    },
-    secondary_log_colors={},
-    style='%'
-))
-
-logger = colorlog.getLogger(__name__)
-logger.addHandler(handler)
-logger.setLevel(logging.DEBUG)
+logger = logging.getLogger(__name__)
 
 def fix_json_content(content: str) -> str:
     """JSONコンテンツを修正"""
@@ -90,6 +71,8 @@ class ThinkingClient:
             base_url=config.base_url
         )
         self.task_plan: Optional[TaskPlan] = None
+        self.conversation_history: List[Dict[str, str]] = []  # 会話履歴を保持するリスト
+        self.tool_results: List[Dict[str, Any]] = []  # ツール実行結果を保持するリスト
         self._context = """
 あなたは高度な思考エンジンとして、ユーザーの要求を分析し、実行計画を立案します。
 応答は必ず以下のJSON形式で返してください：
@@ -148,24 +131,193 @@ class ThinkingClient:
    - parameters: {"query": "検索文", "num_results": 件数}
    - 制約: num_resultsは1-10の範囲
 
+4. spotify
+   - parameters: 
+     - action: 実行するアクション（必須）
+       - "search": 楽曲検索
+         - query: 検索クエリ（必須）
+       - "play": 楽曲再生
+         - track_id: 再生する楽曲のID（必須）
+       - "pause": 再生一時停止
+       - "current_track": 現在再生中の楽曲情報取得
+       - "add_to_queue": キューに楽曲追加
+         - track_id: 追加する楽曲のID（必須）
+   - 制約: 
+     - actionは必須
+     - searchにはqueryが必須
+     - play/add_to_queueにはtrack_idが必須
+
 # 実行ルール
 1. 1フェーズで最大3つまでの操作
 2. human_interactionは単独で使用
 3. database_queryとgoogle_searchは組み合わせ可能
-4. 最大5フェーズまで
-5. 各フェーズは明確な目的が必要
-6. SQLクエリではシングルクォートを使用すること
+4. spotifyは他のツールと組み合わせ可能（human_interactionを除く）
+5. 最大5フェーズまで
+6. 各フェーズは明確な目的が必要
+7. SQLクエリではシングルクォートを使用すること
 
 # エラー処理
 - 不正なJSON形式の場合は再プロンプト
 - 未定義のツール使用は禁止
 - パラメータの検証は必須
+
+# 応答生成のルール
+1. 音声出力があるため、応答は会話的で楽しい表現を使用
+2. Spotifyの操作結果は以下のように応答を生成:
+   - 曲の再生成功: 曲を紹介しつつ自由に解答する。
+   - デバイスエラー: "Spotifyの再生デバイスが見つかりません。アプリを開いて、デバイスを有効にしてください。"
+   - その他のエラー: エラーの内容に応じた親しみやすい説明
 """
         logger.info(f"ThinkingClient初期化完了: モデル={config.model}")
+
+    def add_user_message(self, message: str):
+        """ユーザーのメッセージを会話履歴に追加"""
+        self.conversation_history.append({
+            "role": "user",
+            "content": message
+        })
+        logger.info(f"ユーザーの入力: {message}")
+
+    def add_assistant_message(self, message: str):
+        """アシスタントの応答を会話履歴に追加"""
+        self.conversation_history.append({
+            "role": "assistant",
+            "content": message
+        })
+        logger.info(f"アシスタントの応答: {message}")
+
+    def add_tool_result(self, result: Union[Dict[str, Any], List[Dict[str, Any]]]):
+        """ツール実行結果を履歴に追加"""
+        # リストの場合は各要素を個別に処理
+        if isinstance(result, list):
+            for item in result:
+                simplified = self._simplify_tool_result(item)
+                self.tool_results.append(simplified)
+                logger.info(f"ツール実行結果: {json.dumps(simplified, ensure_ascii=False, indent=2)}")
+        else:
+            # 単一の結果の場合
+            simplified = self._simplify_tool_result(result)
+            self.tool_results.append(simplified)
+            logger.info(f"ツール実行結果: {json.dumps(simplified, ensure_ascii=False, indent=2)}")
+
+    def _simplify_tool_result(self, result: Dict[str, Any]) -> Dict[str, Any]:
+        """ツール実行結果を簡潔な形式に変換"""
+        if not isinstance(result, dict):
+            return {
+                "operation_type": "unknown",
+                "success": False,
+                "error": "Invalid result format"
+            }
+
+        simplified = {
+            "operation_type": result.get("operation_type", "unknown"),
+            "success": result.get("success", False)
+        }
+
+        # エラーがある場合は追加
+        if error := result.get("error"):
+            simplified["error"] = error
+            return simplified
+
+        # 結果の種類に応じて簡潔な情報を抽出
+        if result_data := result.get("result"):
+            if isinstance(result_data, dict):
+                if "tracks" in result_data:  # Spotify検索結果
+                    tracks = result_data["tracks"]
+                    if isinstance(tracks, dict) and "items" in tracks:
+                        items = tracks["items"]
+                        simplified["result"] = {
+                            "found_tracks": len(items),
+                            "first_track": items[0]["name"] if items else None
+                        }
+                    else:
+                        simplified["result"] = {
+                            "found_tracks": len(tracks),
+                            "first_track": tracks[0]["name"] if tracks else None
+                        }
+                elif "status" in result_data:  # Spotify再生状態
+                    simplified["result"] = {
+                        "status": result_data["status"],
+                        "track_id": result_data.get("track_id")
+                    }
+                else:
+                    simplified["result"] = "実行完了"
+            else:
+                simplified["result"] = "実行完了"
+
+        return simplified
+
+    def get_conversation_summary(self) -> str:
+        """会話履歴の要約を生成"""
+        if not self.conversation_history:
+            summary = "会話履歴はありません。"
+            logger.info(summary)
+            return summary
+
+        # 直近の会話（最大5件）を取得
+        recent_history = self.conversation_history[-5:]
+        
+        # ツール実行回数を取得
+        tool_count = len(self.tool_results)
+        
+        # 要約を生成
+        summary_lines = [
+            "========== 実行状況の要約 ==========",
+            "",
+            "【最近の会話】"
+        ]
+        
+        # 直近の会話を追加
+        for msg in recent_history:
+            role = "ユーザー" if msg["role"] == "user" else "アシスタント"
+            content = msg["content"]
+            # 長い内容は省略
+            if len(content) > 100:
+                content = content[:100] + "...(省略)"
+            summary_lines.append(f"- {role}: {content}")
+        
+        # ツール実行情報を追加
+        summary_lines.extend([
+            "",
+            "【実行情報】",
+            f"- ツール実行回数: {tool_count}"
+        ])
+
+        # 最新のツール実行結果を追加（最大3件）
+        if self.tool_results:
+            summary_lines.append("- 最近の実行結果:")
+            for result in self.tool_results[-3:]:
+                if result.get("success"):
+                    status = "成功"
+                    if "result" in result:
+                        if isinstance(result["result"], dict):
+                            details = json.dumps(result["result"], ensure_ascii=False)
+                        else:
+                            details = str(result["result"])
+                        summary_lines.append(f"  ・{result['operation_type']}: {status} - {details}")
+                    else:
+                        summary_lines.append(f"  ・{result['operation_type']}: {status}")
+                else:
+                    status = f"失敗 - {result.get('error', '不明なエラー')}"
+                    summary_lines.append(f"  ・{result['operation_type']}: {status}")
+
+        summary_lines.append("\n" + "=" * 35)
+        
+        summary = "\n".join(summary_lines)
+        logger.info(f"\n{summary}")
+        return summary
     
     async def think(self, context: str, tool_result: Optional[str] = None, iteration: int = 0) -> ThinkingResponse:
         """思考プロセスの実行"""
         logger.info(f"=== O1モデルの思考プロセス開始 (イテレーション: {iteration}) ===")
+        
+        # ツール実行結果があれば履歴に追加
+        if tool_result:
+            try:
+                result_dict = json.loads(tool_result)
+                self.add_tool_result(result_dict)
+            except json.JSONDecodeError:
+                logger.warning("ツール実行結果のJSON解析に失敗しました")
         
         if tool_result:
             prompt = f"""
@@ -179,7 +331,7 @@ class ThinkingClient:
 
 これはイテレーション{iteration}回目です。
 前回の実行結果を分析し、次のフェーズの実行計画または最終応答を決定してください。
-タスクが完了した場合は、final_responseに結果をまとめてください。
+タスクが完了した場合は、final_responseに結果をまとめてください。ここでは音声が付くので、楽し気なセリフで答えてね。
 必ずカンマで要素を区切り、SQLクエリではシングルクォートを使用してください。
 """
         else:
@@ -265,6 +417,8 @@ task_planとcurrent_phaseの両方を含むJSONで応答してください。
                     # final_responseの改行を復元
                     if response_dict.get('final_response'):
                         response_dict['final_response'] = response_dict['final_response'].replace('\\n', '\n')
+                        # アシスタントの応答として記録
+                        self.add_assistant_message(response_dict['final_response'])
                 else:
                     # JSON形式でない場合は、構造化された応答を生成
                     response_dict = {

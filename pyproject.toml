@@ -19,6 +19,7 @@ dependencies = [
     "requests>=2.31.0",
     "pygame>=2.5.0",
     "python-magic-bin>=0.4.14",
+    "spotipy>=2.23.0",
 ]
 
 [tool.poetry]
@@ -42,6 +43,7 @@ colorlog = ">=6.9.0"
 requests = ">=2.31.0"
 pygame = ">=2.5.0"
 python-magic-bin = ">=0.4.14"
+spotipy = ">=2.23.0"
 
 [project.optional-dependencies]
 test = [

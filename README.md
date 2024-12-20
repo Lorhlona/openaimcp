@@ -53,11 +53,18 @@ cd mcp-llm-bridge
 python -m mcp_llm_bridge.main
 ```
 
+python src/mcp_llm_bridge/main.py
+
+NHK党の決めセリフをググって教えて
+
 なっちゃんの写真集の値段３つくらいぐぐってきてよ、なっちゃんっていうのは、、、
+
+小室哲哉のtrfあるやん。なんでもいいから有名な曲1つスポティファイでかけてよ。曲名とともにのりのりで紹介してね
 
 Linux/Mac:
 ```bash
-cd mcp-llm-bridge; source .venv/bin/activate; python -m mcp_llm_bridge.main
+cd mcp-llm-bridge; source .venv/bin/activat
+e; python -m mcp_llm_bridge.main
 ```
 
 ## ライセンス
