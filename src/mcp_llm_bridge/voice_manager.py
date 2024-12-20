@@ -13,6 +13,8 @@ class VoiceManager:
     
     def __init__(self):
         """音声マネージャーの初期化"""
+        self.api_base_url = os.getenv("NIJIVOICE_API_BASE_URL")
+        self.voice_actor_id = os.getenv("VOICE_ACTOR_ID")
         self.api_key = os.getenv("NIJIVOICE_API_KEY")
         self.voice_mode = os.getenv("VOICE_MODE", "true").lower() == "true"
         self._temp_files = []  # 一時ファイルのリストを保持
@@ -100,59 +102,7 @@ class VoiceManager:
                             
                 text = text[:497] + "..."
             
-            url = f"{self.api_base_url}/voice-actors/{self.voice_actor_id}/generate-voice"
-            
-            headers = {
-                "x-api-key": self.api_key,
-                "accept": "application/json",  # JSONレスポンスを要求
-                "content-type": "application/json"
-            }
-            
-            payload = {
-                "script": text,
-                "speed": "1.0",
-                "format": "mp3"
-            }
-            
-            logger.debug(f"Sending request to {url}")
-            logger.debug(f"Headers: {json.dumps({k: v if k != 'x-api-key' else '[REDACTED]' for k, v in headers.items()}, indent=2)}")
-            logger.debug(f"Payload: {json.dumps(payload, indent=2)}")
-            
-            response = requests.post(url, json=payload, headers=headers)
-            
-            logger.debug(f"Response status code: {response.status_code}")
-            logger.debug(f"Response headers: {dict(response.headers)}")
-            
-            if response.status_code != 200:
-                logger.error(f"API error: {response.status_code} - {response.text}")
-                return None
-            
-            content_type = response.headers.get('content-type', '')
-            logger.debug(f"Response content type: {content_type}")
-            
-            try:
-                data = response.json()
-                logger.debug(f"JSON response: {json.dumps(data, indent=2)}")
-                
-                if 'generatedVoice' in data and 'audioFileUrl' in data['generatedVoice']:
-                    audio_url = data['generatedVoice']['audioFileUrl']
-                    logger.debug(f"Found audio URL: {audio_url}")
-                    
-                    # 音声データをダウンロード
-                    audio_response = requests.get(audio_url)
-                    if audio_response.status_code == 200:
-                        logger.debug("Successfully downloaded audio data")
-                        return audio_response.content
-                    else:
-                        logger.error(f"Failed to download audio: {audio_response.status_code}")
-                        return None
-                else:
-                    logger.error("No audio URL found in response")
-                    return None
-                    
-            except json.JSONDecodeError as e:
-                logger.error(f"Failed to parse JSON response: {str(e)}")
-                return None
+            return audio_data
                 
         except Exception as e:
             logger.error(f"Error generating voice: {str(e)}")
@@ -205,3 +155,13 @@ class VoiceManager:
                     except Exception as e:
                         logger.error(f"Error deleting temporary file: {str(e)}")
                         time.sleep(0.5)  # 0.5秒待機してリトライ
+
+    def _cleanup_temp_files(self):
+        """プログラム終了時に一時ファイルを削除する"""
+        for path in self._temp_files:
+            if os.path.exists(path):
+                try:
+                    os.remove(path)
+                except Exception as e:
+                    logger.error(f"Failed to remove temp file {path}: {str(e)}")
+        self._temp_files.clear()
